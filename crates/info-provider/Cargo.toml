@@ -17,7 +17,7 @@ serde_json.workspace = true
 tar = "0.4"
 tokio = { workspace = true, features = ["sync"] }
 urlencoding.workspace = true
-zstd = "0.13.5"
+zstd = "0.14.4"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

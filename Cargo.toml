@@ -29,7 +29,7 @@ default-members = ["crates/cargotom"]
     parser = { path = "./crates/parser" }
     proctitle = "0.1.1"
     regex = "1.13"
-    reqwest = "0.12"
+    reqwest = "0.13"
     ropey = "1.6.1"
     rust-version = { path = "./crates/rust-version" }
     serde = "1.0"
@@ -37,7 +37,7 @@ default-members = ["crates/cargotom"]
     taplo = { git = "https://github.com/frederik-uni/taplo" }
     tcp-struct = { git = "https://github.com/frederik-uni/tcp-struct" }
     tokio = "1.54"
-    toml = "0.9"
+    toml = "1.2"
     tower-lsp = "0.20.0"
     trie-rs = "0.4.2"
     url = "2.5"
