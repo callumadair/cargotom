@@ -140,14 +140,13 @@ impl Db {
                         if let Ok(ver) = ver {
                             let versions = items
                                 .iter()
-                                .filter_map(|v| v.ver().map(|ver| (v, ver)))
+                                .map(|v| (v, v.version()))
                                 .collect::<Vec<_>>();
                             if let Some((package, ..)) =
                                 versions.iter().rfind(|(_, v)| ver.matches(v))
                             {
-                                let all_features = package.feature_all();
                                 for feature in &toml.data.features.data {
-                                    if !all_features.contains(&feature.data) {
+                                    if !package.features().contains_key(feature.data.as_str()) {
                                         errors.push((
                                             RangeExclusive::from(feature),
                                             "Unknown Feature".to_string(),
@@ -165,7 +164,7 @@ impl Db {
                                     if self.config.outdated_crate_warnings {
                                         warnings.push((
                                             range,
-                                            format!("Newer version available: {}", info.vers),
+                                            format!("Newer version available: {}", info.version()),
                                         ))
                                     }
                                 }

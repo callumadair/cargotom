@@ -1,6 +1,7 @@
 use std::usize;
 
 use cargo_util_schemas::core::{PartialVersion, SourceKind};
+use info_provider::api::feature_lines;
 use parser::{
     lock::LoggedReadGuard,
     toml::{Dependency, Positioned},
@@ -34,7 +35,7 @@ impl Context {
                 Ok(v) => format!(
                     "List of all available versions: \n{}",
                     v.into_iter()
-                        .map(|v| format!("- {}", v.vers))
+                        .map(|v| format!("- {}", v.version()))
                         .rev()
                         .collect::<Vec<_>>()
                         .join("\n")
@@ -141,8 +142,8 @@ impl Context {
                 Ok(v) => format!(
                     "List of all available features: \n{}",
                     v.into_iter()
-                        .rfind(|v| v.ver().is_some_and(|ver| vers.matches(&ver)))
-                        .map(|v| v.features(lock.config.feature_display_mode))
+                        .rfind(|v| vers.matches(v.version()))
+                        .map(|v| feature_lines(&v, lock.config.feature_display_mode))
                         .unwrap_or_default()
                         .into_iter()
                         .map(|v| format!("- {v}"))

@@ -366,7 +366,7 @@ impl LanguageServer for Context
                         if let Some(last) = data.last()
                         {
                             if let Some(upgrade_dep) =
-                                self.upgrade_dep(&uri, &value.value, last.ver(), &lock)
+                                self.upgrade_dep(&uri, &value.value, Some(last.version().clone()), &lock)
                             {
                                 actions.push(CodeActionOrCommand::CodeAction(upgrade_dep));
                             }
@@ -462,7 +462,7 @@ impl LanguageServer for Context
                                     match lock.config.stable_version
                                     {
                                         false => true,
-                                        true => v.ver().is_some_and(|v| v.pre.is_empty()),
+                                        true => v.version().pre.is_empty(),
                                     }
                                 })
                             })
@@ -494,7 +494,7 @@ impl LanguageServer for Context
                                                             new_text: format!(
                                                                 "{} = \"{}\"",
                                                                 dep.data.crate_name(),
-                                                                info.vers
+                                                                info.version()
                                                             ),
                                                         }],
                                                     )]
@@ -866,11 +866,12 @@ impl LanguageServer for Context
                         items:         info
                             .into_iter()
                             .rev()
-                            .filter(|v| v.vers.starts_with(slice))
+                            .map(|v| v.version().to_string())
+                            .filter(|v| v.starts_with(slice))
                             .enumerate()
                             .map(|(i, v)| {
                                 CompletionItem {
-                                    label: v.vers.clone(),
+                                    label: v.clone(),
                                     kind: Some(CompletionItemKind::MODULE),
                                     detail: None,
                                     sort_text: Some(format!("{:06}", i)),
@@ -888,7 +889,7 @@ impl LanguageServer for Context
                                         new_text: {
                                             let mut dep = dep.data.clone();
                                             dep.source.set_version(OptionalKey::no_key(
-                                                Positioned::new(0, 0, v.vers),
+                                                Positioned::new(0, 0, v),
                                             ));
                                             crate::actions::manifest_dir(&uri)
                                                 .and_then(|dir| dep.to_manifest_text(&dir, &dir))
@@ -932,12 +933,8 @@ impl LanguageServer for Context
                         .await
                         .unwrap_or_default()
                         .into_iter()
-                        .rfind(|v| match (&version, v.ver()) {
-                            (Some(req), Some(ver)) => req.matches(&ver),
-                            (None, None) => true,
-                            _ => false,
-                        })
-                        .map(|v| v.feature_all())
+                        .rfind(|v| version.as_ref().is_some_and(|req| req.matches(v.version())))
+                        .map(|v| v.features().keys().map(ToString::to_string).collect::<Vec<_>>())
                         .unwrap_or_default();
 
                     let start = try_option!(lock.get_offset(&uri, feat.start as usize));

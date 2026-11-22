@@ -1,6 +1,7 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use api::{CacheItem, CacheItemOut, Crate, Root1};
+use api::{CacheItem, CacheItemOut, Crate};
+pub use cargo::workspace::Summary;
 use fst::{Set, SetBuilder};
 use local::OfflineCrate;
 use tokio::sync::RwLock;
@@ -10,10 +11,9 @@ mod downloader;
 mod local;
 pub struct InfoProvider {
     client: Arc<reqwest::Client>,
-    registry: &'static str,
-    registries: HashMap<String, String>,
     readme_cache: Arc<RwLock<HashMap<(String, String), CacheItem<String>>>>,
-    info_cache: Arc<RwLock<HashMap<String, HashMap<String, CacheItem<Root1>>>>>,
+    /// Keyed by registry name, where `None` is crates.io, and crate name.
+    info_cache: Arc<RwLock<HashMap<(Option<String>, String), CacheItem<Summary>>>>,
     search_cache: Arc<RwLock<HashMap<String, CacheItem<Crate>>>>,
     per_page: RwLock<usize>,
     offline: Arc<RwLock<bool>>,
@@ -41,30 +41,11 @@ impl InfoProvider {
             local::init(off.clone(), off_data.clone(), data_path.clone()).await;
         }
 
-        let registries = cargo_config2::Config::load()
-            .expect("missing cargo config")
-            .registries
-            .into_iter()
-            .flat_map(|(name, registry)| {
-                registry.index.map(|index| {
-                    (
-                        name,
-                        index
-                            .strip_prefix("sparse+")
-                            .map(ToOwned::to_owned)
-                            .unwrap_or(index),
-                    )
-                })
-            })
-            .collect();
-
         Self {
             root: data_path,
             data: off_data,
             offline: off,
             client: Arc::new(reqwest::Client::new()),
-            registry: "https://index.crates.io/",
-            registries,
             info_cache: Default::default(),
             search_cache: Default::default(),
             readme_cache: Default::default(),
@@ -97,11 +78,11 @@ impl InfoProvider {
         }
     }
 
-    pub async fn get_info_cache(&self, registry: Option<&str>, name: &str) -> CacheItemOut<Root1> {
+    pub async fn get_info_cache(&self, registry: Option<&str>, name: &str) -> CacheItemOut<Summary> {
         self.get_info_cache_api(registry, name).await
     }
 
-    pub async fn get_info(&self, registry: Option<&str>, name: &str) -> Result<Vec<Root1>, String> {
+    pub async fn get_info(&self, registry: Option<&str>, name: &str) -> Result<Vec<Summary>, String> {
         self.get_info_api(registry, name).await
     }
 
