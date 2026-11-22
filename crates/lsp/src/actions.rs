@@ -2,11 +2,12 @@ use std::{collections::HashMap, sync::Arc};
 
 use parser::{
     lock::LoggedReadGuard,
+    structs::version::is_newer,
     toml::{DepSource, Dependency, DependencyKind, Positioned},
     tree::RangeExclusive,
     Db,
 };
-use rust_version::RustVersion;
+use cargo_util_schemas::core::PartialVersion;
 use tower_lsp::lsp_types::{
     CodeAction, CodeActionKind, Position, Range, TextEdit, Url, WorkspaceEdit,
 };
@@ -18,12 +19,12 @@ impl Context {
         &self,
         uri: &Url,
         version: &Positioned<String>,
-        ver: Option<RustVersion>,
+        ver: Option<semver::Version>,
         lock: &LoggedReadGuard<Db>,
     ) -> Option<CodeAction> {
         let ver = ver?;
-        let version_parsed = RustVersion::try_from(version.data.as_str()).ok()?;
-        if ver <= version_parsed {
+        let version_parsed = version.data.parse::<PartialVersion>().ok()?;
+        if !is_newer(&version_parsed, &ver) {
             return None;
         }
         let start = lock.get_offset(&uri, version.start as usize)?;

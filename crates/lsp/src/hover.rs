@@ -1,13 +1,15 @@
 use std::usize;
 
+use cargo_util_schemas::core::{PartialVersion, SourceKind};
 use parser::{
     lock::LoggedReadGuard,
-    structs::lock::Source,
     toml::{Dependency, Positioned},
     tree::RangeExclusive,
     Db,
 };
-use rust_version::RustVersion;
+
+/// Index URL that `Cargo.lock` records for a crates.io package.
+const CRATES_IO_INDEX: &str = "https://github.com/rust-lang/crates.io-index";
 use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position, Range, Url};
 
 use crate::lsp::Context;
@@ -70,13 +72,11 @@ impl Context {
         if range.contains(offset) {
             let start = lock.get_offset(&uri, range.start as usize)?;
             let end = lock.get_offset(&uri, range.end as usize)?;
-            let lock = lock.get_lock(uri)?.packages();
-            let lock = lock.get(dep.data.name())?.first()?;
-            let mut use_ = false;
-            if let Some(Source::Registry(s)) = &lock.source {
-                use_ = s == "https://github.com/rust-lang/crates.io-index";
-            }
-            if !use_ {
+            let lock = lock.get_locked_package(uri, dep.data.name())?;
+            let source = lock.source.as_ref()?;
+            if !matches!(source.kind(), SourceKind::Registry)
+                || source.url().as_str() != CRATES_IO_INDEX
+            {
                 return None;
             }
             let content = self
@@ -115,8 +115,7 @@ impl Context {
             return None;
         }
         let range = RangeExclusive::from(&dep.data.features);
-        let vers = RustVersion::try_from(
-            match &dep.data.source {
+        let vers: PartialVersion = match &dep.data.source {
                 parser::toml::DepSource::Version { value, .. } => Some(&value.value.data),
                 parser::toml::DepSource::Workspace(_) => {
                     let workspace_uri = lock.get_workspace(uri)?;
@@ -129,9 +128,8 @@ impl Context {
                 }
                 _ => None,
             }?
-            .as_str(),
-        )
-        .ok()?;
+            .parse()
+            .ok()?;
         if range.contains(offset) {
             let start = lock.get_offset(&uri, range.start as usize)?;
             let end = lock.get_offset(&uri, range.end as usize)?;
@@ -143,10 +141,7 @@ impl Context {
                 Ok(v) => format!(
                     "List of all available features: \n{}",
                     v.into_iter()
-                        .rfind(|v| match &v.ver() {
-                            Some(v) => Some(v),
-                            None => None,
-                        } == Some(&vers))
+                        .rfind(|v| v.ver().is_some_and(|ver| vers.matches(&ver)))
                         .map(|v| v.features(lock.config.feature_display_mode))
                         .unwrap_or_default()
                         .into_iter()

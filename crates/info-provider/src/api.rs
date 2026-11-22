@@ -4,7 +4,6 @@ use std::{
 };
 
 use reqwest::{header::USER_AGENT, Client};
-use rust_version::RustVersion;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
@@ -442,7 +441,8 @@ impl Root1 {
         }
         features.into_iter().collect()
     }
-    pub fn ver(&self) -> Option<RustVersion> {
-        RustVersion::try_from(self.vers.as_str()).ok()
+    /// Returns the published version, or `None` when `vers` is not valid semver.
+    pub fn ver(&self) -> Option<semver::Version> {
+        self.vers.parse().ok()
     }
 }

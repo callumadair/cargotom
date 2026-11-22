@@ -23,7 +23,8 @@ use info_provider::InfoProvider;
 use lock::LoggedRwLock;
 use ropey::Rope;
 use static_structure::{parse_all, Parsed};
-use structs::lock::{CargoLockRaw, Package};
+use cargo_util_schemas::lockfile::{TomlLockfile, TomlLockfileDependency};
+use structs::lock::LockedPackage;
 use tokio::sync::RwLock;
 use toml::{Dependency, Positioned, Toml};
 use tower_lsp::{lsp_types::MessageType, Client};
@@ -41,7 +42,7 @@ pub struct Db {
     tomls: HashMap<Uri, Toml>,
     info: Arc<InfoProvider>,
     workspaces: Workspaces,
-    locks: HashMap<Uri, CargoLockRaw>,
+    locks: HashMap<Uri, TomlLockfile>,
     pub warnings: Arc<RwLock<HashMap<Uri, Vec<Warning>>>>,
     pub config: Config,
 }
@@ -131,37 +132,32 @@ impl Db {
         file_uri.as_str().starts_with(workspace_uri.as_str())
     }
 
-    pub fn get_lock(&self, uri: &Uri) -> Option<&CargoLockRaw> {
+    /// Returns the first `Cargo.lock` entry named `name` for the workspace that
+    /// holds `uri`.
+    pub fn get_locked_package(&self, uri: &Uri, name: &str) -> Option<&TomlLockfileDependency> {
         let mut file = self.workspaces.get(uri).unwrap_or(uri).clone();
         if let Ok(mut v) = file.path_segments_mut() {
             v.pop();
             v.push("Cargo.lock");
         }
-        self.locks.get(&file)
+        self.locks
+            .get(&file)?
+            .package
+            .as_ref()?
+            .iter()
+            .find(|package| package.name == name)
     }
 
-    pub async fn hints(&self, uri: &Uri) -> Option<Vec<((usize, usize), Package)>> {
+    pub async fn hints(&self, uri: &Uri) -> Option<Vec<((usize, usize), LockedPackage<'_>)>> {
         let toml = self.tomls.get(uri)?;
-        let mut root_file = match self.workspaces.get(uri) {
-            None => uri,
-            Some(v) => v,
-        }
-        .clone();
-        if let Ok(mut v) = root_file.path_segments_mut() {
-            v.pop();
-            v.push("Cargo.lock");
-        }
-        let lock = self.locks.get(&root_file)?;
-        let packges = lock.packages();
-        let extract = |id: String| packges.get(&id)?.first();
         let data = toml
             .dependencies
             .iter()
             .filter_map(|v| {
-                self.get_offset(uri, v.end as usize)
-                    .map(|pos| (pos, extract(v.data.crate_name())))
+                let pos = self.get_offset(uri, v.end as usize)?;
+                let package = self.get_locked_package(uri, &v.data.crate_name())?;
+                Some((pos, LockedPackage(package)))
             })
-            .filter_map(|(pos, p)| p.map(|p| (pos, p.clone())))
             .collect::<Vec<_>>();
         Some(data)
     }
@@ -226,7 +222,7 @@ impl Db {
     pub async fn update_lock(&mut self, uri: Uri) {
         if let Ok(path) = uri.to_file_path() {
             if let Ok(str) = read_to_string(path) {
-                if let Ok(lock) = ::toml::from_str::<CargoLockRaw>(&str) {
+                if let Ok(lock) = ::toml::from_str::<TomlLockfile>(&str) {
                     self.locks.insert(uri, lock);
                 }
             }

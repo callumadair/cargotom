@@ -2,10 +2,12 @@ use std::collections::HashMap;
 
 use async_recursion::async_recursion;
 use info_provider::api::CacheItemOut;
-use rust_version::RustVersion;
+use cargo_util_schemas::core::PartialVersion;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
-use crate::{toml::DepSource, tree::RangeExclusive, Db, Level, Uri, Warning};
+use crate::{
+    structs::version::is_newer, toml::DepSource, tree::RangeExclusive, Db, Level, Uri, Warning,
+};
 
 fn crate_not_found_message(registry: Option<&str>, name: &str) -> String {
     match registry {
@@ -134,13 +136,15 @@ impl Db {
                             ));
                             continue;
                         }
-                        let ver = RustVersion::try_from(value.value.data.as_str());
+                        let ver = value.value.data.parse::<PartialVersion>();
                         if let Ok(ver) = ver {
                             let versions = items
                                 .iter()
                                 .filter_map(|v| v.ver().map(|ver| (v, ver)))
                                 .collect::<Vec<_>>();
-                            if let Some((package, ..)) = versions.iter().rfind(|(_, v)| v == &ver) {
+                            if let Some((package, ..)) =
+                                versions.iter().rfind(|(_, v)| ver.matches(v))
+                            {
                                 let all_features = package.feature_all();
                                 for feature in &toml.data.features.data {
                                     if !all_features.contains(&feature.data) {
@@ -153,10 +157,10 @@ impl Db {
                                 if let Some((info, _)) = versions
                                     .iter()
                                     .filter(|v| match self.config.stable_version {
-                                        true => !v.1.is_pre_release(),
+                                        true => v.1.pre.is_empty(),
                                         false => true,
                                     })
-                                    .rfind(|(_, v)| v > &ver)
+                                    .rfind(|(_, v)| is_newer(&ver, v))
                                 {
                                     if self.config.outdated_crate_warnings {
                                         warnings.push((

@@ -1,145 +1,71 @@
-use std::collections::HashMap;
+use std::fmt::{self, Display};
 
-use serde::Deserialize;
-use serde_json::Value;
-use url::Url;
+use cargo_util_schemas::{core::SourceKind, lockfile::TomlLockfileDependency};
 
-use super::version::RustVersion;
+/// Number of commit hash characters shown for a git dependency.
+const SHORT_REV_LEN: usize = 7;
 
-#[derive(Debug, Deserialize)]
-/// parsed information of the Cargo.lock file
-pub struct CargoLockRaw {
-    package: Vec<PackageRaw>,
-}
+/// A locked package shown as an inlay hint.
+///
+/// `Display` prints the locked version, followed by `#` and the short commit
+/// hash for a git source.
+#[derive(Debug, Clone, Copy)]
+pub struct LockedPackage<'a>(pub &'a TomlLockfileDependency);
 
-impl CargoLockRaw {
-    /// converts the raw data into a more usable format
-    pub fn packages(&self) -> HashMap<String, Vec<Package>> {
-        let mut out = HashMap::new();
-        for package in &self.package {
-            let by_name: &mut Vec<Package> = out.entry(package.name.clone()).or_default();
-            by_name.push(Package {
-                version: RustVersion::try_from(package.version.as_str()).unwrap(),
-                source: package.source.as_ref().map(|v| v.as_str().into()),
-                checksum: package.checksum.clone(),
-                dependencies: package.dependencies.clone(),
-            });
-        }
-        out
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct PackageRaw {
-    name: String,
-    version: String,
-    source: Option<String>,
-    checksum: Option<String>,
-    dependencies: Option<Vec<Value>>,
-}
-
-#[derive(Debug, Clone)]
-/// A package parsed from the Cargo.lock file
-pub struct Package {
-    /// version of the package
-    pub version: RustVersion,
-    /// source of the package
-    pub source: Option<Source>,
-    /// checksum of the package
-    checksum: Option<String>,
-    /// dependencies of the package
-    dependencies: Option<Vec<Value>>,
-}
-
-impl Package {
-    pub fn version(&self) -> &RustVersion {
-        &self.version
-    }
-
-    pub fn branch(&self) -> Option<&String> {
-        match &self.source {
-            Some(Source::Git { branch, .. }) => branch.as_ref(),
-            _ => None,
-        }
-    }
-
-    pub fn rev(&self) -> Option<&String> {
-        match &self.source {
-            Some(Source::Git { rev, .. }) => Some(rev),
-            _ => None,
-        }
-    }
-
-    pub fn tag(&self) -> Option<&String> {
-        match &self.source {
-            Some(Source::Git { tag, .. }) => tag.as_ref(),
-            _ => None,
-        }
-    }
-
-    pub fn is_registry(&self) -> bool {
-        match self.source {
-            Some(Source::Registry(_)) => true,
-            _ => false,
-        }
-    }
-
-    pub fn is_git(&self) -> bool {
-        match self.source {
-            Some(Source::Git { .. }) => true,
-            _ => false,
-        }
-    }
-    pub fn label(&self) -> String {
-        match &self.source {
-            Some(Source::Git { rev, .. }) => format!("{} #{}", self.version, &rev[..7]),
-            _ => self.version.to_string(),
+impl Display for LockedPackage<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let package = self.0;
+        let rev = package
+            .source
+            .as_ref()
+            .filter(|source| matches!(source.kind(), SourceKind::Git(_)))
+            .and_then(|source| source.url().fragment());
+        match rev {
+            Some(rev) => write!(
+                f,
+                "{} #{}",
+                package.version,
+                rev.get(..SHORT_REV_LEN).unwrap_or(rev)
+            ),
+            None => package.version.fmt(f),
         }
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum Source {
-    Registry(String),
-    Git {
-        url: String,
-        branch: Option<String>,
-        tag: Option<String>,
-        rev: String,
-    },
-    Other(String),
-}
+#[cfg(test)]
+mod tests {
+    use cargo_util_schemas::lockfile::TomlLockfile;
 
-impl From<&str> for Source {
-    fn from(value: &str) -> Self {
-        if value.starts_with("registry+") {
-            Source::Registry(value.replace("registry+", ""))
-        } else if let Some(url_str) = value.strip_prefix("git+") {
-            match Url::parse(url_str) {
-                Ok(url) => {
-                    let rev = url.fragment().unwrap_or("").to_string();
+    use super::*;
 
-                    let branch = url
-                        .query_pairs()
-                        .find(|(key, _)| key == "branch")
-                        .map(|(_, value)| value.to_string());
+    const LOCK: &str = r#"
+version = 4
 
-                    let tag = url
-                        .query_pairs()
-                        .find(|(key, _)| key == "tag")
-                        .map(|(_, value)| value.to_string());
+[[package]]
+name = "serde"
+version = "1.0.228"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
-                    Source::Git {
-                        url: url_str.to_string(),
-                        branch,
-                        tag,
-                        rev,
-                    }
-                }
-                Err(_) => Source::Other(value.to_string()),
-            }
-        } else {
-            Source::Other(value.to_string())
-        }
+[[package]]
+name = "taplo"
+version = "0.13.2"
+source = "git+https://github.com/frederik-uni/taplo#0123456789abcdef"
+
+[[package]]
+name = "short"
+version = "0.1.0"
+source = "git+https://example.com/short?branch=main#abc"
+"#;
+
+    #[test]
+    fn display_adds_short_rev_for_git_only() {
+        let lock = toml::from_str::<TomlLockfile>(LOCK).unwrap();
+        let labels = lock
+            .package
+            .unwrap()
+            .iter()
+            .map(|package| LockedPackage(package).to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["1.0.228", "0.13.2 #0123456", "0.1.0 #abc"]);
     }
 }

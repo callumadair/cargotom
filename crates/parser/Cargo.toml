@@ -5,13 +5,14 @@ edition.workspace = true
 
 [dependencies]
 async-recursion.workspace = true
+cargo-util-schemas.workspace = true
 difference = "2.0.0"
 glob.workspace = true
 indexmap = { workspace = true, features = ["serde"] }
 info-provider = { workspace = true }
 regex.workspace = true
 ropey.workspace = true
-rust-version.workspace = true
+semver.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 taplo.workspace = true
@@ -21,6 +22,7 @@ tower-lsp.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+rstest = "0.26"
 tokio = { workspace = true, features = ["full"] }
 
 [features]

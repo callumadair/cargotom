@@ -20,7 +20,7 @@ use parser::{
     Db,
     Indent,
 };
-use rust_version::RustVersion;
+use cargo_util_schemas::core::PartialVersion;
 use tower_lsp::{
     async_trait,
     jsonrpc::Result,
@@ -462,7 +462,7 @@ impl LanguageServer for Context
                                     match lock.config.stable_version
                                     {
                                         false => true,
-                                        true => v.ver().map(|v| v.is_pre_release()) == Some(false),
+                                        true => v.ver().is_some_and(|v| v.pre.is_empty()),
                                     }
                                 })
                             })
@@ -651,7 +651,7 @@ impl LanguageServer for Context
             .map(|v| {
                 InlayHint {
                     position:      Position::new(v.0 .0 as u32, v.0 .1 as u32),
-                    label:         tower_lsp::lsp_types::InlayHintLabel::String(v.1.label()),
+                    label:         tower_lsp::lsp_types::InlayHintLabel::String(v.1.to_string()),
                     kind:          Some(InlayHintKind::TYPE),
                     text_edits:    None,
                     tooltip:       None,
@@ -918,7 +918,7 @@ impl LanguageServer for Context
                 };
                 if let Some(DepSource::Version { value, registry }) = &src
                 {
-                    let version = RustVersion::try_from(value.value.data.as_str()).ok();
+                    let version = value.value.data.parse::<PartialVersion>().ok();
                     let features = self
                         .info
                         .get_info(
@@ -928,7 +928,11 @@ impl LanguageServer for Context
                         .await
                         .unwrap_or_default()
                         .into_iter()
-                        .rfind(|v| v.ver() == version)
+                        .rfind(|v| match (&version, v.ver()) {
+                            (Some(req), Some(ver)) => req.matches(&ver),
+                            (None, None) => true,
+                            _ => false,
+                        })
                         .map(|v| v.feature_all())
                         .unwrap_or_default();
 

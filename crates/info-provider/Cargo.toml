@@ -11,7 +11,7 @@ fst.workspace = true
 html2md.workspace = true
 openssl = { workspace = true, features = ["vendored"] }
 reqwest = { workspace = true, features = ["json"] }
-rust-version.workspace = true
+semver.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tar = "0.4"
