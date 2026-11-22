@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 byteorder.workspace = true
-cargo-config2 = "0.1.39"
+cargo-config2 = "0.1.45"
 fst.workspace = true
 html2md.workspace = true
 openssl = { workspace = true, features = ["vendored"] }
@@ -17,7 +17,7 @@ serde_json.workspace = true
 tar = "0.4"
 tokio = { workspace = true, features = ["sync"] }
 urlencoding.workspace = true
-zstd = "0.13.3"
+zstd = "0.13.5"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
