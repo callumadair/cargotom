@@ -2,13 +2,24 @@
 name = "lsp"
 version.workspace = true
 edition.workspace = true
+description = "Language Server Protocol handlers of the cargotom language server"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
+cargo.workspace = true
+cargo-util-schemas.workspace = true
 info-provider = { workspace = true }
 parser = { workspace = true }
-rust-version.workspace = true
+semver.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["io-std"] }
+snafu.workspace = true
+tokio = { workspace = true, features = ["io-std", "process"] }
 tower-lsp.workspace = true
 webbrowser = { workspace = true }
+
+[lints]
+workspace = true

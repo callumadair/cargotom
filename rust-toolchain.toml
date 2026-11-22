@@ -1,0 +1,6 @@
+# Builds and lints use stable. rustfmt.toml uses nightly-only
+# options, so format with `cargo +nightly fmt`. A toolchain file
+# holds one channel and cannot pin nightly rustfmt by itself.
+[toolchain]
+channel = "stable"
+components = ["clippy"]

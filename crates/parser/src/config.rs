@@ -1,90 +1,46 @@
 use info_provider::api::ViewMode;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
+/// Client settings. A field that the client leaves out
+/// takes its value from [`Config::default`].
 #[derive(Deserialize, Serialize)]
-pub struct Config {
-    #[serde(default = "default_per_page")]
-    pub per_page: usize,
-
-    /// All, UnusedOpt, Features,
-    #[serde(default = "default_feature_display_mode")]
-    pub feature_display_mode: ViewMode,
-
-    #[serde(default)]
-    pub hide_docs_info_message: bool,
-
-    #[serde(default)]
-    pub sort_format: bool,
-
-    #[serde(default = "default_true")]
-    pub offline: bool,
-
-    #[serde(default = "default_true")]
-    pub stable_version: bool,
-
-    #[serde(default = "default_true")]
+#[serde(default)]
+pub struct Config
+{
+    /// Most crates that one search completion lists.
+    /// Default 25.
+    pub per_page:                u32,
+    /// Which features a crate hover lists. Default
+    /// [`ViewMode::UnusedOpt`].
+    pub feature_display_mode:    ViewMode,
+    /// Hides the hint on the first line of every manifest.
+    /// Default `false`.
+    pub hide_docs_info_message:  bool,
+    /// Sorts keys and arrays when the manifest is
+    /// formatted. Default `false`.
+    pub sort_format:             bool,
+    /// Skips pre-release versions when picking the newest
+    /// version. Default `true`.
+    pub stable_version:          bool,
+    /// Warns when a newer version than the requirement
+    /// exists. Default `true`.
     pub outdated_crate_warnings: bool,
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct ConfigV2 {
-    pub online: OnlineConfig,
-    pub offline: OfflineConfig,
-    pub display: DisplayConfig,
-    pub general: GeneralConfig,
-}
-
-#[derive(Deserialize, Serialize)]
-pub struct GeneralConfig {
-    #[serde(default = "default_true")]
-    pub stable_version: bool,
-    #[serde(default)]
-    pub sort_format: bool,
-}
-
-#[derive(Deserialize, Serialize)]
-pub struct OnlineConfig {
-    #[serde(default = "default_per_page")]
-    pub per_page: usize,
-}
-
-#[derive(Deserialize, Serialize)]
-pub struct OfflineConfig {
-    #[serde(default = "default_true")]
-    pub offline: bool,
-}
-
-#[derive(Deserialize, Serialize)]
-pub struct DisplayConfig {
-    /// All, UnusedOpt, Features,
-    #[serde(default = "default_feature_display_mode")]
-    pub feature_display_mode: ViewMode,
-    #[serde(default)]
-    pub hide_docs_info_message: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
+impl Default for Config
+{
+    fn default() -> Self
+    {
         Self {
-            per_page: default_per_page(),
-            feature_display_mode: default_feature_display_mode(),
-            hide_docs_info_message: false,
-            sort_format: false,
-            stable_version: true,
-            offline: true,
+            per_page:                25,
+            feature_display_mode:    ViewMode::UnusedOpt,
+            hide_docs_info_message:  false,
+            sort_format:             false,
+            stable_version:          true,
             outdated_crate_warnings: true,
         }
     }
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_per_page() -> usize {
-    25
-}
-
-fn default_feature_display_mode() -> ViewMode {
-    ViewMode::UnusedOpt
 }

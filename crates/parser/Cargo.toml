@@ -2,27 +2,39 @@
 name = "parser"
 version.workspace = true
 edition.workspace = true
+description = "Document state and analysis of Cargo.toml files for the cargotom language server"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-async-recursion.workspace = true
-difference = "2.0.0"
-glob.workspace = true
+cargo.workspace = true
+cargo-platform.workspace = true
+cargo-util.workspace = true
+cargo-util-schemas.workspace = true
+derive_more = { version = "2.1.1", features = ["display"] }
 indexmap = { workspace = true, features = ["serde"] }
 info-provider = { workspace = true }
 regex.workspace = true
 ropey.workspace = true
-rust-version.workspace = true
+semver.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+snafu.workspace = true
+strum = { version = "0.28.0", features = ["derive"] }
 taplo.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["fs", "rt", "sync"] }
 toml.workspace = true
+toml_edit.workspace = true
 tower-lsp.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+cargo-util-terminal = "0.1.3"
+rstest = "0.26"
+tempfile = "3.27"
 tokio = { workspace = true, features = ["full"] }
 
-[features]
-default = []
-log-all = []
+[lints]
+workspace = true

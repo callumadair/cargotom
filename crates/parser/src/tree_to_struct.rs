@@ -1,137 +1,122 @@
 use std::sync::Arc;
 
+use cargo_platform::Platform;
+
 use crate::{
-    structs::{deps::get_dependencies, feat::get_features},
-    toml::{Dependency, DependencyKind, Positioned, Target, Toml},
-    tree::Value,
     Tree,
+    structs::{
+        deps::get_dependencies,
+        feat::get_features,
+    },
+    toml::{
+        Dependency,
+        DependencyKind,
+        Positioned,
+        Toml,
+    },
+    tree::Value,
 };
 
-pub fn to_struct(tree: &Tree, target: Arc<Vec<Positioned<Target>>>) -> Toml {
+/// Returns the dependencies and features of `tree`.
+/// `target` is the platform list of the `[target.*]` table
+/// that holds `tree`. A key whose value has
+/// the wrong shape, such as `target = "x"`, adds nothing.
+pub fn to_struct(
+    tree: &Tree,
+    target: Arc<Vec<Positioned<Platform>>>,
+) -> Toml
+{
     let mut dep = vec![];
     let mut features = vec![];
     let mut tar = vec![];
-    let mut mem = vec![];
-    for value in tree.nodes.iter() {
-        match value.key.value.as_str() {
-            "profile" | "badges" | "lints" | "patch" | "replace" | "bench" | "test" | "example"
-            | "package" | "lib" | "bin" => { /* ignore */ }
-            "dependencies" => {
-                let deps = get_dependencies(&value.value, DependencyKind::Normal, target.clone())
-                    .unwrap_or_default();
-                dep.extend(deps);
-            }
-            "dev-dependencies" => {
-                let deps =
-                    get_dependencies(&value.value, DependencyKind::Development, target.clone())
-                        .unwrap_or_default();
-                dep.extend(deps);
-            }
-            "build-dependencies" => {
-                let deps = get_dependencies(&value.value, DependencyKind::Build, target.clone())
-                    .unwrap_or_default();
-                dep.extend(deps);
-            }
-            "target" => {
-                for tree in value.value.as_tree().unwrap().nodes.iter() {
+    let mut workspace_deps = None;
+    for value in &tree.nodes
+    {
+        match value.key.value.as_str()
+        {
+            "target" =>
+            {
+                let Some(targets) = value.value.as_tree()
+                else
+                {
+                    continue;
+                };
+                for tree in &targets.nodes
+                {
+                    let Some(table) = tree.value.as_tree()
+                    else
+                    {
+                        continue;
+                    };
                     let key = &tree.key.value;
                     let range = tree.key.closest_range(tree.pos.end);
-                    let targets = if key.ends_with(")") {
-                        if let Some(v) = key.strip_prefix("cfg(") {
-                            let value = v.strip_suffix(")").unwrap();
-                            Arc::new(vec![Positioned {
-                                start: range.start + 4,
-                                end: range.end - 1,
-                                data: Target::Unknown(value.to_string()),
-                            }])
-                        } else {
-                            Arc::new(vec![Positioned {
-                                start: range.start,
-                                end: range.end,
-                                data: Target::Unknown(key.to_string()),
-                            }])
-                        }
-                    } else {
-                        Arc::new(vec![Positioned {
-                            start: range.start,
-                            end: range.end,
-                            data: Target::Unknown(key.to_string()),
-                        }])
-                    };
-                    tar.push(to_struct(tree.value.as_tree().unwrap(), targets));
+                    // A key that is still being typed is
+                    // kept as a target name.
+                    let platform = key
+                        .parse::<Platform>()
+                        .unwrap_or_else(|_| Platform::Name(key.to_string()));
+                    let targets = Arc::new(vec![Positioned::new(range.start, range.end, platform)]);
+                    tar.push(to_struct(table, targets));
                 }
             }
-            "features" => {
-                features.extend(get_features(&value.value).unwrap_or_default());
+            "features" => features.extend(get_features(&value.value)),
+            "workspace" =>
+            {
+                workspace_deps
+                    .get_or_insert_with(Vec::new)
+                    .extend(workspace_dependencies(&value.value, &target))
             }
-            "workspace" => {
-                mem.push(generate_workspace(&value.value, target.clone()));
+            key =>
+            {
+                if let Ok(kind) = key.parse::<DependencyKind>()
+                {
+                    dep.extend(get_dependencies(&value.value, kind, &target));
+                }
             }
-            _ => {}
         }
     }
-    let workspace = !mem.is_empty();
-    let (children, dep_w) = mem.into_iter().filter_map(|v| v).fold(
-        (Vec::new(), Vec::new()),
-        |(mut acc_strs, mut acc_deps), (strs, deps)| {
-            acc_strs.extend(strs);
-            acc_deps.extend(deps);
-            (acc_strs, acc_deps)
-        },
-    );
-    let tar = tar.into_iter().reduce(|acc, i| acc.join(i));
     let r = Toml {
-        workspace,
-        children,
-        dependencies: match workspace {
-            true => dep_w,
-            false => dep,
-        },
+        workspace: workspace_deps.is_some(),
+        dependencies: workspace_deps.unwrap_or(dep),
         features,
     };
-    match tar {
-        Some(tar) => r.join(tar),
-        None => r,
-    }
+    tar.into_iter().fold(r, Toml::join)
 }
 
-fn get_workspace_members(value: &Value) -> Option<Vec<String>> {
-    let value = value
-        .as_array()?
-        .iter()
-        .filter_map(|v| v.as_str())
-        .map(|s| s.data)
-        .collect::<Vec<_>>();
-    Some(value)
-}
-
-pub(crate) fn generate_workspace(
+/// Returns the `[workspace.dependencies]` entries of a
+/// `[workspace]` table.
+fn workspace_dependencies(
     value: &Value,
-    targets: Arc<Vec<Positioned<Target>>>,
-) -> Option<(Vec<String>, Vec<Positioned<Dependency>>)> {
-    let mut depend = vec![];
-    let mut mem = vec![];
-    let tree = value.as_tree()?;
-    for tree_value in tree.nodes.iter() {
-        match tree_value.key.value.as_str() {
-            "members" | "default-members" => {
-                mem.extend(get_workspace_members(&tree_value.value).unwrap_or_default());
-            }
-            "dependencies" => {
-                let deps =
-                    get_dependencies(&tree_value.value, DependencyKind::Normal, targets.clone())
-                        .unwrap_or_default();
-                depend.extend(deps);
-            }
-            // unimportant keys
-            "resolver" => {}
-            "exclude" => {}
-            "package" => {}
-            "lints" => {}
-            "metadata" => {}
-            _ => {}
-        }
-    }
+    targets: &Arc<Vec<Positioned<Platform>>>,
+) -> Vec<Positioned<Dependency>>
+{
+    value
+        .as_tree()
+        .into_iter()
+        .flat_map(|tree| &tree.nodes)
+        .filter(|node| node.key.value == "dependencies")
+        .flat_map(|node| get_dependencies(&node.value, DependencyKind::Normal, targets))
+        .collect()
+}
 
-    Some((mem, depend))
+#[cfg(test)]
+mod tests
+{
+    use rstest::rstest;
+
+    use super::*;
+
+    // A scalar where a table belongs panicked the analysis.
+    #[rstest]
+    #[case::scalar_target("target = \"x\"\n")]
+    #[case::scalar_target_entry("[target]\nunix = 1\n")]
+    #[case::scalar_workspace("workspace = 1\n")]
+    #[case::scalar_dependencies("dependencies = \"x\"\n")]
+    fn to_struct_skips_a_scalar_table(#[case] manifest: &str) -> Result<(), &'static str>
+    {
+        let dom = taplo::parser::parse(manifest).into_dom();
+        let tree = Tree::from(dom.as_table().ok_or("the document root is not a table")?);
+        assert!(to_struct(&tree, Arc::default()).dependencies.is_empty());
+        Ok(())
+    }
 }

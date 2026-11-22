@@ -1,63 +1,52 @@
 use std::{
-    collections::{
-        HashMap,
-        HashSet,
-    },
-    path::PathBuf,
+    error::Error,
     sync::Arc,
 };
 
 use info_provider::InfoProvider;
 use parser::{
-    config::Config,
-    lock::LoggedRwLock,
-    toml::{
-        DepSource,
-        OptionalKey,
-        Positioned,
-    },
-    tree::RangeExclusive,
     Db,
     Indent,
+    config::Config,
+    static_structure,
 };
-use rust_version::RustVersion;
+use snafu::ResultExt;
+use tokio::sync::RwLock;
 use tower_lsp::{
+    Client,
+    LanguageServer,
+    LspService,
+    Server,
     async_trait,
-    jsonrpc::Result,
+    jsonrpc::{
+        self,
+        Result,
+    },
     lsp_types::{
-        CodeAction,
-        CodeActionKind,
         CodeActionOrCommand,
         CodeActionParams,
         CodeActionProviderCapability,
         CodeActionResponse,
-        Command,
-        CompletionItem,
-        CompletionItemKind,
-        CompletionList,
         CompletionOptions,
         CompletionParams,
         CompletionResponse,
-        CompletionTextEdit,
         DidChangeTextDocumentParams,
         DidChangeWorkspaceFoldersParams,
         DidOpenTextDocumentParams,
         DocumentFormattingParams,
+        ExecuteCommandOptions,
         ExecuteCommandParams,
         Hover,
-        HoverContents,
         HoverParams,
         HoverProviderCapability,
         InitializeParams,
         InitializeResult,
         InlayHint,
         InlayHintKind,
+        InlayHintLabel,
         InlayHintParams,
-        MarkupKind,
         MessageType,
         OneOf,
-        Position,
-        Range,
         ServerCapabilities,
         ServerInfo,
         SignatureHelpOptions,
@@ -66,54 +55,239 @@ use tower_lsp::{
         TextDocumentSyncOptions,
         TextEdit,
         Url,
-        WorkspaceEdit,
         WorkspaceFoldersServerCapabilities,
         WorkspaceServerCapabilities,
     },
-    Client,
-    LanguageServer,
-    LspService,
-    Server,
 };
 
+use crate::{
+    actions::{
+        DepActions,
+        dep_actions,
+        manifest_dir,
+    },
+    utils::{
+        ContextSnafu,
+        command_action,
+        first_line_actions,
+        has_file_name,
+        report,
+    },
+};
+
+/// The commands that `execute_command` runs.
+const COMMANDS: [&str; 3] = ["open_url", "cargo-update", "open-src"];
+
+/// The language server. Every handler shares one [`Db`].
 pub struct Context
 {
-    pub client: Client,
-    db:         Arc<LoggedRwLock<Db>>,
-    pub info:   Arc<InfoProvider>,
+    pub client:    Client,
+    pub(crate) db: Arc<RwLock<Db>>,
+    pub info:      Arc<InfoProvider>,
 }
 
-macro_rules! try_option {
-    ($expr:expr) => {
-        match $expr
-        {
-            Some(val) => val,
-            None => return Ok(None),
-        }
-    };
-}
-
-macro_rules! crate_version {
-    () => {
-        env!("CARGO_PKG_VERSION")
-    };
-}
-
-fn dependency_requirement(version: &str) -> &str
-{
-    version
-        .split_once('+')
-        .map_or(version, |(version, _)| version)
-}
-
-fn load_config(params: &InitializeParams) -> Config
+/// Reads the client settings from the initialisation
+/// options. A client that sends none gets
+/// [`Config::default`].
+fn load_config(params: &InitializeParams) -> serde_json::Result<Config>
 {
     params
         .initialization_options
         .clone()
         .map(serde_json::from_value)
-        .and_then(|v| v.ok())
-        .unwrap_or_default()
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+/// Returns the address of the `Cargo.toml` in the folder at
+/// `root`, or `None` when `root` is not a local folder.
+fn manifest_uri(root: &Url) -> Option<Url>
+{
+    Url::from_file_path(root.to_file_path().ok()?.join("Cargo.toml")).ok()
+}
+
+impl Context
+{
+    async fn log_error(
+        &self,
+        error: &(dyn Error + Send + Sync + 'static),
+    )
+    {
+        self.client
+            .log_message(MessageType::ERROR, report(error))
+            .await;
+    }
+
+    /// Loads the manifest in the workspace folder `root`.
+    /// The db stays locked only for this one folder.
+    async fn init_root(
+        &self,
+        root: &Url,
+    )
+    {
+        let Some(manifest) = manifest_uri(root)
+        else
+        {
+            self.client
+                .log_message(
+                    MessageType::WARNING,
+                    format!("{root} is not a local folder"),
+                )
+                .await;
+            return;
+        };
+        let result = self.db.write().await.try_init(&manifest).await;
+        if let Err(e) = result
+        {
+            self.log_error(&e).await;
+        }
+    }
+
+    /// Applies an open or a change of `uri`. A `Cargo.lock`
+    /// is read from disk, and a `Cargo.toml` takes
+    /// `changes` as `(range, text)` pairs.
+    async fn apply(
+        &self,
+        uri: Url,
+        changes: Vec<(Option<tower_lsp::lsp_types::Range>, String)>,
+    )
+    {
+        let result = if has_file_name(&uri, "Cargo.lock")
+        {
+            self.db.write().await.update_lock(uri).await
+        }
+        else if has_file_name(&uri, "Cargo.toml")
+        {
+            let mut db = self.db.write().await;
+            match changes
+                .iter()
+                .try_for_each(|(range, text)| db.update(&uri, *range, text))
+            {
+                Ok(()) => db.reload(uri).await,
+                Err(e) => Err(e),
+            }
+        }
+        else
+        {
+            return;
+        };
+        if let Err(e) = result
+        {
+            self.log_error(&e).await;
+        }
+    }
+
+    /// Returns the actions for the dependency under
+    /// `range`, built under the db lock with one cargo
+    /// config.
+    async fn dep_actions(
+        &self,
+        uri: &Url,
+        range: tower_lsp::lsp_types::Range,
+    ) -> Option<DepActions>
+    {
+        let result = {
+            let db = self.db.read().await;
+            self.info
+                .context()
+                .context(ContextSnafu)
+                .and_then(|gctx| Ok(dep_actions(&db, &gctx, uri, range)?))
+        };
+        match result
+        {
+            Ok(actions) => actions,
+            Err(e) =>
+            {
+                self.log_error(&e).await;
+                None
+            }
+        }
+    }
+
+    /// Runs `cargo update` in the workspace of the manifest
+    /// `uri`, and shows a failure to the user.
+    async fn cargo_update(
+        &self,
+        uri: Option<Url>,
+    )
+    {
+        let manifest = match uri
+        {
+            Some(uri) =>
+            {
+                self.db
+                    .read()
+                    .await
+                    .get_workspace(&uri)
+                    .cloned()
+                    .or(Some(uri))
+            }
+            None => None,
+        };
+        let Some(dir) = manifest.as_ref().and_then(manifest_dir)
+        else
+        {
+            self.client
+                .show_message(
+                    MessageType::ERROR,
+                    "cargo update needs the address of a manifest",
+                )
+                .await;
+            return;
+        };
+        let message = match tokio::process::Command::new("cargo")
+            .arg("update")
+            .current_dir(&dir)
+            .output()
+            .await
+        {
+            Ok(output) if output.status.success() => return,
+            Ok(output) =>
+            {
+                format!(
+                    "cargo update failed in {}: {}",
+                    dir.display(),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            }
+            Err(e) => format!("cannot run cargo update in {}: {e}", dir.display()),
+        };
+        self.client.show_message(MessageType::ERROR, message).await;
+    }
+
+    /// Returns the source repository of the crate, or its
+    /// docs.rs source view when the registry lists no
+    /// repository.
+    async fn source_url(
+        &self,
+        name: &str,
+        version: Option<&str>,
+    ) -> Option<String>
+    {
+        match self.info.get_crate_repository(name).await
+        {
+            Ok(Some(url)) => return Some(url),
+            Ok(None) =>
+            {}
+            Err(e) => self.log_error(e.as_ref()).await,
+        }
+        version.map(|version| format!("https://docs.rs/crate/{name}/{version}/source/"))
+    }
+
+    async fn open_url(
+        &self,
+        url: &str,
+    ) -> Result<Option<serde_json::Value>>
+    {
+        if let Err(e) = webbrowser::open(url)
+        {
+            self.client
+                .show_message(MessageType::WARNING, format!("failed to open browser {e}"))
+                .await;
+            return Err(jsonrpc::Error::invalid_params("failed to open browser"));
+        }
+        Ok(None)
+    }
 }
 
 #[async_trait]
@@ -124,19 +298,16 @@ impl LanguageServer for Context
         params: DidChangeWorkspaceFoldersParams,
     )
     {
-        let mut lock = self.db.write("did_change_workspace_folders").await;
-        for remove in params.event.removed
         {
-            lock.remove_workspace(&remove.uri);
-        }
-        for add in params.event.added
-        {
-            let mut root = add.uri;
-            if !root.as_str().ends_with('/')
+            let mut db = self.db.write().await;
+            for removed in &params.event.removed
             {
-                root = Url::parse(&(root.as_str().to_owned() + "/")).unwrap();
+                db.remove_workspace(&removed.uri);
             }
-            lock.try_init(&root.join("Cargo.toml").unwrap()).await;
+        }
+        for added in &params.event.added
+        {
+            self.init_root(&added.uri).await;
         }
     }
 
@@ -145,105 +316,68 @@ impl LanguageServer for Context
         params: InitializeParams,
     ) -> Result<InitializeResult>
     {
-        let c = self.db.clone();
-        let config = load_config(&params);
-        let mut lock = self.db.write("initialize").await;
-        lock.config = config;
-        self.info.set_per_page(lock.config.per_page).await;
-        self.info.set_offline(lock.config.offline).await;
-
-        lock.sel = Some(c);
-        for v in params.workspace_folders.unwrap_or_default()
+        let config = match load_config(&params)
         {
-            let mut root = v.uri;
-            if !root.as_str().ends_with('/')
+            Ok(config) => config,
+            Err(e) =>
             {
-                root = Url::parse(&(root.as_str().to_owned() + "/")).unwrap();
+                self.log_error(&e).await;
+                Config::default()
             }
-            lock.try_init(&root.join("Cargo.toml").unwrap()).await;
+        };
+        if let Err(e) = static_structure::schema()
+        {
+            self.log_error(e).await;
         }
-        if let Some(root) = params.root_uri
+        self.info.set_per_page(config.per_page).await;
+        self.db.write().await.config = config;
+        let roots = params
+            .workspace_folders
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| v.uri)
+            .chain(params.root_uri);
+        for root in roots
         {
-            let mut root = root;
-            if !root.as_str().ends_with('/')
-            {
-                root = Url::parse(&(root.as_str().to_owned() + "/")).unwrap();
-            }
-            lock.try_init(&root.join("Cargo.toml").unwrap()).await;
+            self.init_root(&root).await;
         }
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
-                text_document_sync:                   Some(TextDocumentSyncCapability::Options(
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
                         open_close: Some(true),
                         change: Some(TextDocumentSyncKind::INCREMENTAL),
                         ..Default::default()
                     },
                 )),
-                completion_provider:                  Some(CompletionOptions {
-                    trigger_characters: Some(vec![
-                        "\"".to_string(),
-                        ".".to_string(),
-                        ":".to_string(),
-                        "-".to_string(),
-                    ]),
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(["\"", ".", ":", "-"].map(String::from).to_vec()),
                     ..Default::default()
                 }),
-                signature_help_provider:              Some(SignatureHelpOptions {
-                    trigger_characters: Some(vec!["\"".to_string()]),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["\"".to_owned()]),
                     ..Default::default()
                 }),
-                position_encoding:                    None,
-                selection_range_provider:             None,
-                hover_provider:                       Some(HoverProviderCapability::Simple(true)),
-                definition_provider:                  None,
-                type_definition_provider:             None,
-                implementation_provider:              None,
-                references_provider:                  None,
-                document_highlight_provider:          None,
-                document_symbol_provider:             None,
-                workspace_symbol_provider:            None,
-                code_action_provider:                 Some(CodeActionProviderCapability::Simple(
-                    true,
-                )),
-                code_lens_provider:                   None,
-                document_formatting_provider:         Some(OneOf::Left(true)),
-                document_range_formatting_provider:   None,
-                document_on_type_formatting_provider: None,
-                rename_provider:                      None,
-                document_link_provider:               None,
-                color_provider:                       None,
-                folding_range_provider:               None,
-                declaration_provider:                 None,
-                execute_command_provider:             Some(
-                    tower_lsp::lsp_types::ExecuteCommandOptions {
-                        commands: vec![
-                            "open_url".to_string(),
-                            "cargo-update".to_string(),
-                            "open-src".to_string(),
-                        ],
-                        ..Default::default()
-                    },
-                ),
-                workspace:                            Some(WorkspaceServerCapabilities {
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
+                execute_command_provider: Some(ExecuteCommandOptions {
+                    commands: COMMANDS.map(String::from).to_vec(),
+                    ..Default::default()
+                }),
+                workspace: Some(WorkspaceServerCapabilities {
                     workspace_folders: Some(WorkspaceFoldersServerCapabilities {
                         supported:            Some(true),
                         change_notifications: Some(OneOf::Left(true)),
                     }),
                     file_operations:   None,
                 }),
-                call_hierarchy_provider:              None,
-                semantic_tokens_provider:             None,
-                moniker_provider:                     None,
-                linked_editing_range_provider:        None,
-                inline_value_provider:                None,
-                inlay_hint_provider:                  Some(OneOf::Left(true)),
-                diagnostic_provider:                  None,
-                experimental:                         None,
+                inlay_hint_provider: Some(OneOf::Left(true)),
+                ..Default::default()
             },
             server_info:  Some(ServerInfo {
-                name:    "CargoTom".to_string(),
-                version: Some(crate_version!().to_owned()),
+                name:    "CargoTom".to_owned(),
+                version: Some(env!("CARGO_PKG_VERSION").to_owned()),
             }),
         })
     }
@@ -255,34 +389,12 @@ impl LanguageServer for Context
         params: DidChangeTextDocumentParams,
     )
     {
-        let uri = params.text_document.uri.clone();
-        if uri.to_string().ends_with("/Cargo.lock")
-        {
-            let mut lock = self.db.write("change").await;
-
-            lock.update_lock(uri).await;
-            return;
-        }
-        if !self.shoud_allow_user(&uri)
-        {
-            return;
-        }
-        {
-            let mut lock = self.db.write("change").await;
-            for change in params.content_changes
-            {
-                let range = change.range.map(|v| {
-                    (
-                        (v.start.line as usize, v.start.character as usize),
-                        (v.end.line as usize, v.end.character as usize),
-                    )
-                });
-                lock.update(&uri, range, &change.text);
-            }
-            lock.reload(uri).await;
-        }
-
-        let _ = self.client.inlay_hint_refresh().await;
+        let changes = params
+            .content_changes
+            .into_iter()
+            .map(|v| (v.range, v.text))
+            .collect();
+        self.apply(params.text_document.uri, changes).await;
     }
 
     async fn did_open(
@@ -290,23 +402,8 @@ impl LanguageServer for Context
         params: DidOpenTextDocumentParams,
     )
     {
-        let uri = params.text_document.uri;
-        if uri.to_string().ends_with("/Cargo.lock")
-        {
-            let mut lock = self.db.write("open").await;
-            lock.update_lock(uri).await;
-            return;
-        }
-        if !self.shoud_allow_user(&uri)
-        {
-            return;
-        }
-        {
-            let mut lock = self.db.write("open").await;
-            lock.update(&uri, None, &params.text_document.text);
-            lock.reload(uri).await;
-        }
-        let _ = self.client.inlay_hint_refresh().await;
+        let document = params.text_document;
+        self.apply(document.uri, vec![(None, document.text)]).await;
     }
 
     async fn code_action(
@@ -314,289 +411,71 @@ impl LanguageServer for Context
         params: CodeActionParams,
     ) -> Result<Option<CodeActionResponse>>
     {
-        if !self.shoud_allow_user(&params.text_document.uri)
+        let uri = params.text_document.uri;
+        if !has_file_name(&uri, "Cargo.toml")
         {
             return Ok(None);
         }
         let mut actions = vec![];
-
-        let mut actions_last = vec![CodeActionOrCommand::CodeAction(CodeAction {
-            title: "Update All".to_string(),
-            kind: Some(CodeActionKind::EMPTY),
-            command: Some(Command {
-                title:     "Update All".to_string(),
-                command:   "cargo-update".to_string(),
-                arguments: None,
-            }),
-            ..CodeAction::default()
-        })];
-
-        let uri = params.text_document.uri;
-
+        let dep = self
+            .dep_actions(&uri, params.range)
+            .await
+            .unwrap_or_default();
+        if let Some(lookup) = dep.lookup
+            && let Some(action) = self.lookup_action(lookup).await
+        {
+            actions.push(action);
+        }
+        let mut response: Vec<CodeActionOrCommand> = actions
+            .into_iter()
+            .chain(dep.edits)
+            .map(CodeActionOrCommand::CodeAction)
+            .collect();
         if params.range.start.line == 0 || params.range.end.line == 0
         {
-            actions.extend(self.first_line_actions().await);
+            response.splice(0..0, first_line_actions());
         }
-        let lock = self.db.read("code_action").await;
-        if let Some(dep) = lock.get_dependency(
-            &uri,
-            (
-                params.range.start.line as usize,
-                params.range.start.character as usize,
-            ),
-            (
-                params.range.end.line as usize,
-                params.range.end.character as usize,
-            ),
-        )
-        {
-            if let parser::toml::DepSource::Version { value, registry } = &dep.data.source
-            {
-                let version_info = self
-                    .info
-                    .get_info(
-                        registry.as_ref().map(|v| v.value.data.as_str()),
-                        &dep.data.crate_name(),
-                    )
-                    .await;
-                match version_info
-                {
-                    Ok(data) =>
-                    {
-                        if let Some(last) = data.last()
-                        {
-                            if let Some(upgrade_dep) =
-                                self.upgrade_dep(&uri, &value.value, last.ver(), &lock)
-                            {
-                                actions.push(CodeActionOrCommand::CodeAction(upgrade_dep));
-                            }
-                        }
-                    }
-                    _ =>
-                    {}
-                }
-                let version = &value.value.data;
-
-                let crate_name = &dep.data.crate_name();
-
-                let open_page =
-                    |actions_last: &mut Vec<CodeActionOrCommand>, name, url: &String| {
-                        let action = CodeAction {
-                            title: format!("Open {name}"),
-                            kind: Some(CodeActionKind::EMPTY),
-                            command: Some(Command {
-                                title:     format!("Open {name}"),
-                                command:   "open_url".to_string(),
-                                arguments: Some(vec![serde_json::Value::String(url.clone())]),
-                            }),
-                            ..CodeAction::default()
-                        };
-                        actions_last.push(CodeActionOrCommand::CodeAction(action));
-                    };
-
-                if lock.config.offline
-                {
-                    let info = self.info.get_local(crate_name).await;
-                    if let Some(info) = info
-                    {
-                        if let Some(repo) = &info.repository
-                        {
-                            open_page(&mut actions_last, "Repository", repo);
-                        }
-                        if let Some(documentation) = &info.documentation
-                        {
-                            open_page(&mut actions_last, "Documentation", documentation);
-                        }
-                        if let Some(homepage) = &info.homepage
-                        {
-                            open_page(&mut actions_last, "Homepage", homepage);
-                        }
-                    }
-                }
-                else
-                {
-                    open_page(
-                        &mut actions_last,
-                        "Documentation",
-                        &format!("https://docs.rs/{crate_name}/{version}/"),
-                    );
-                    let action = CodeAction {
-                        title: "Open Source".to_string(),
-                        kind: Some(CodeActionKind::EMPTY),
-                        command: Some(Command {
-                            title:     "Open Source".to_string(),
-                            command:   "open-src".to_string(),
-                            arguments: Some(vec![
-                                serde_json::Value::String(crate_name.clone()),
-                                serde_json::Value::String(version.clone()),
-                            ]),
-                        }),
-                        ..CodeAction::default()
-                    };
-                    actions_last.push(CodeActionOrCommand::CodeAction(action));
-                }
-                open_page(
-                    &mut actions_last,
-                    "crates.io",
-                    &format!("https://crates.io/crates/{crate_name}"),
-                );
-            }
-            else if let DepSource::Workspace(range) = &dep.data.source
-            {
-                let workspace_uri = lock.get_workspace(&uri);
-                let workspace = workspace_uri.as_ref().and_then(|v| lock.get_toml(v));
-                if let (Some(workspace_uri), Some(workspace)) = (workspace_uri, &workspace)
-                {
-                    if workspace
-                        .dependencies
-                        .iter()
-                        .find(|v| v.data.name() == dep.data.crate_name())
-                        .is_none()
-                    {
-                        if let Ok(Some(info)) = self
-                            .info
-                            .get_info(None, &dep.data.crate_name())
-                            .await
-                            .map(|v| {
-                                v.into_iter().rfind(|v| {
-                                    match lock.config.stable_version
-                                    {
-                                        false => true,
-                                        true => v.ver().map(|v| v.is_pre_release()) == Some(false),
-                                    }
-                                })
-                            })
-                        {
-                            if let Some(last) = workspace.dependencies.last()
-                            {
-                                let line = lock.get_line(&workspace_uri, last.end as usize);
-                                if let Some(line) = line
-                                {
-                                    actions.insert(
-                                        0,
-                                        CodeActionOrCommand::CodeAction(CodeAction {
-                                            title: "Add to workspace".to_owned(),
-                                            edit: Some(WorkspaceEdit {
-                                                changes: Some(
-                                                    vec![(
-                                                        workspace_uri.to_owned(),
-                                                        vec![TextEdit {
-                                                            range:    Range::new(
-                                                                Position {
-                                                                    line:      line as u32 + 1,
-                                                                    character: 0,
-                                                                },
-                                                                Position {
-                                                                    line:      line as u32 + 1,
-                                                                    character: 0,
-                                                                },
-                                                            ),
-                                                            new_text: format!(
-                                                                "{} = \"{}\"",
-                                                                dep.data.crate_name(),
-                                                                info.vers
-                                                            ),
-                                                        }],
-                                                    )]
-                                                    .into_iter()
-                                                    .collect::<HashMap<_, _>>(),
-                                                ),
-                                                ..Default::default()
-                                            }),
-                                            ..Default::default()
-                                        }),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if let Some(a) = self.dep_actions(&uri, dep, &lock)
-            {
-                actions.extend(a.into_iter().map(CodeActionOrCommand::CodeAction));
-            }
-        }
-
-        actions.extend(actions_last);
-        Ok(Some(actions))
+        let update = command_action("Update All", "cargo-update", vec![uri.to_string().into()]);
+        response.extend(
+            std::iter::once(update)
+                .chain(dep.links)
+                .map(CodeActionOrCommand::CodeAction),
+        );
+        Ok(Some(response))
     }
 
     async fn execute_command(
         &self,
-        mut params: ExecuteCommandParams,
-    ) -> tower_lsp::jsonrpc::Result<Option<serde_json::Value>>
+        params: ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>>
     {
-        if params.command == "cargo-update"
+        let arg = |index: usize| params.arguments.get(index).and_then(|v| v.as_str());
+        match params.command.as_str()
         {
-            let _ = std::process::Command::new("cargo").arg("update").spawn();
-            return Ok(None);
+            "cargo-update" =>
+            {
+                self.cargo_update(arg(0).and_then(|v| Url::parse(v).ok()))
+                    .await;
+                Ok(None)
+            }
+            "open-src" =>
+            {
+                let name =
+                    arg(0).ok_or_else(|| jsonrpc::Error::invalid_params("crate name missing"))?;
+                let url = self
+                    .source_url(name, arg(1))
+                    .await
+                    .ok_or_else(|| jsonrpc::Error::invalid_params("crate version missing"))?;
+                self.open_url(&url).await
+            }
+            "open_url" =>
+            {
+                let url =
+                    arg(0).ok_or_else(|| jsonrpc::Error::invalid_params("URL argument missing"))?;
+                self.open_url(url).await
+            }
+            _ => Err(jsonrpc::Error::method_not_found()),
         }
-
-        if params.command == "open-src"
-        {
-            let name = params.arguments.get(0).and_then(|arg| arg.as_str());
-            let version = params.arguments.get(1).and_then(|arg| arg.as_str());
-            let mut src = if let Some(name) = name
-            {
-                self.info.get_crate_repository(name).await
-            }
-            else
-            {
-                None
-            };
-            if src.is_none()
-            {
-                match (name, version)
-                {
-                    (Some(name), Some(version)) =>
-                    {
-                        src = Some(format!(
-                            "https://docs.rs/crate/{}/{}/source/",
-                            name, version
-                        ));
-                    }
-                    _ =>
-                    {}
-                }
-            }
-            if let Some(src) = src
-            {
-                params.command = "open_url".to_string();
-                params.arguments = vec![serde_json::Value::String(src)]
-            }
-        }
-
-        if params.command == "open_url"
-        {
-            let mut args = params.arguments.iter();
-            if let Some(url) = args.next().and_then(|arg| arg.as_str())
-            {
-                if let Err(e) = webbrowser::open(url)
-                {
-                    self.client
-                        .show_message(
-                            MessageType::WARNING,
-                            format!("failed to open browser {}", e.to_string()),
-                        )
-                        .await;
-                    return Err(tower_lsp::jsonrpc::Error::invalid_params(
-                        "failed to open browser",
-                    ));
-                }
-            }
-            else
-            {
-                return Err(tower_lsp::jsonrpc::Error::invalid_params(
-                    "URL argument missing",
-                ));
-            }
-        }
-        else
-        {
-            return Err(tower_lsp::jsonrpc::Error::method_not_found());
-        }
-        Ok(None)
     }
 
     async fn formatting(
@@ -604,30 +483,20 @@ impl LanguageServer for Context
         params: DocumentFormattingParams,
     ) -> Result<Option<Vec<TextEdit>>>
     {
-        let temp = self.db.read("formatting").await;
-        let data = temp
-            .format(
-                &params.text_document.uri,
-                params.options.insert_final_newline.unwrap_or(true),
-                match params.options.insert_spaces
-                {
-                    true => Indent::Spaces(params.options.tab_size),
-                    false => Indent::Tab,
-                },
-            )
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(range, text)| {
-                TextEdit {
-                    range:    Range::new(
-                        Position::new(range.0 .0 as u32, range.0 .1 as u32),
-                        Position::new(range.1 .0 as u32, range.1 .1 as u32),
-                    ),
-                    new_text: text,
-                }
-            })
-            .collect();
-        Ok(Some(data))
+        let options = params.options;
+        let indent = if options.insert_spaces
+        {
+            Indent::Spaces(options.tab_size)
+        }
+        else
+        {
+            Indent::Tab
+        };
+        let trailing_new_line = options.insert_final_newline.unwrap_or(true);
+        let db = self.db.read().await;
+        Ok(db
+            .format(&params.text_document.uri, trailing_new_line, indent)
+            .map(|v| vec![v]))
     }
 
     async fn inlay_hint(
@@ -635,33 +504,30 @@ impl LanguageServer for Context
         params: InlayHintParams,
     ) -> Result<Option<Vec<InlayHint>>>
     {
-        if !self.shoud_allow_user(&params.text_document.uri)
+        let uri = params.text_document.uri;
+        if !has_file_name(&uri, "Cargo.toml")
         {
             return Ok(None);
         }
-
-        let v = self
-            .db
-            .read("inlay_hint")
-            .await
-            .hints(&params.text_document.uri)
-            .await
+        let db = self.db.read().await;
+        let hints = db
+            .hints(&uri)
             .unwrap_or_default()
             .into_iter()
-            .map(|v| {
+            .map(|(position, package)| {
                 InlayHint {
-                    position:      Position::new(v.0 .0 as u32, v.0 .1 as u32),
-                    label:         tower_lsp::lsp_types::InlayHintLabel::String(v.1.label()),
-                    kind:          Some(InlayHintKind::TYPE),
-                    text_edits:    None,
-                    tooltip:       None,
-                    padding_left:  Some(true),
+                    position,
+                    label: InlayHintLabel::String(package.to_string()),
+                    kind: Some(InlayHintKind::TYPE),
+                    text_edits: None,
+                    tooltip: None,
+                    padding_left: Some(true),
                     padding_right: Some(true),
-                    data:          None,
+                    data: None,
                 }
             })
             .collect();
-        Ok(Some(v))
+        Ok(Some(hints))
     }
 
     async fn hover(
@@ -669,56 +535,13 @@ impl LanguageServer for Context
         params: HoverParams,
     ) -> Result<Option<Hover>>
     {
-        let uri = params.text_document_position_params.text_document.uri;
-        if !self.shoud_allow_user(&uri)
+        let position = params.text_document_position_params;
+        let uri = position.text_document.uri;
+        if !has_file_name(&uri, "Cargo.toml")
         {
             return Ok(None);
         }
-
-        let lock = self.db.read("hover").await;
-        if let Some(h) = self
-            .hover_dep(&uri, params.text_document_position_params.position, &lock)
-            .await
-        {
-            return Ok(Some(h));
-        }
-
-        let path = lock
-            .get_path(
-                &uri,
-                params.text_document_position_params.position.line,
-                params.text_document_position_params.position.character,
-            )
-            .await;
-        if let (Some(last), Some(path)) = (path.as_ref().and_then(|v| v.last()), &path)
-        {
-            let p = path
-                .iter()
-                .map(|v| v.tyoe.to_string())
-                .collect::<Vec<String>>();
-            let detail = try_option!(lock.static_data.get_detail(&p, 0, last.is_value(None)));
-            let start = try_option!(lock.get_offset(&uri, last.range.start as usize));
-            let end = try_option!(lock.get_offset(&uri, last.range.end as usize));
-
-            return Ok(Some(Hover {
-                contents: HoverContents::Markup(tower_lsp::lsp_types::MarkupContent {
-                    kind:  MarkupKind::PlainText,
-                    value: detail,
-                }),
-                range:    Some(Range::new(
-                    Position {
-                        line:      start.0 as u32,
-                        character: start.1 as u32,
-                    },
-                    Position {
-                        line:      end.0 as u32,
-                        character: end.1 as u32,
-                    },
-                )),
-            }));
-        }
-
-        Ok(None)
+        Ok(Context::hover(self, &uri, position.position).await)
     }
 
     async fn completion(
@@ -726,307 +549,22 @@ impl LanguageServer for Context
         params: CompletionParams,
     ) -> Result<Option<CompletionResponse>>
     {
-        let uri = params.text_document_position.text_document.uri;
-        if !self.shoud_allow_user(&uri)
+        let position = params.text_document_position;
+        let uri = position.text_document.uri;
+        if !has_file_name(&uri, "Cargo.toml")
         {
             return Ok(None);
         }
-
-        let lock = self.db.read("completion").await;
-        let toml = match lock.get_toml(&uri)
-        {
-            Some(v) => v,
-            None => return Ok(None),
-        };
-        let workspace = lock.get_workspace(&uri).and_then(|uri| lock.get_toml(uri));
-        let pos = params.text_document_position.position;
-        let pos = match lock.get_byte(&uri, pos.line as usize, pos.character as usize)
-        {
-            Some(v) => v,
-            None => return Ok(None),
-        };
-        let mut deps = toml
-            .dependencies
-            .iter()
-            .map(|v| v.data.name())
-            .collect::<HashSet<_>>();
-        if let Some(dep) = toml.dependencies.iter().find(|v| v.contains(pos))
-        {
-            if dep.data.crate_name_range().contains(pos)
-            {
-                let end = pos.saturating_sub(dep.data.crate_name_range().start as usize);
-                let remove = toml
-                    .dependencies
-                    .iter()
-                    .find(|v| {
-                        v.data.name() == dep.data.name()
-                            && v.data.crate_name_range() != dep.data.crate_name_range()
-                    })
-                    .is_none();
-                if remove
-                {
-                    deps.remove(&dep.data.name());
-                }
-                let slice = dep.data.name().get(..end).unwrap_or(&dep.data.name());
-                let info = self.info.search(slice).await.unwrap_or_default();
-                let start = try_option!(lock.get_offset(&uri, dep.start as usize));
-                let end = try_option!(lock.get_offset(&uri, dep.end as usize));
-                let out = Ok(Some(CompletionResponse::List(CompletionList {
-                    is_incomplete: true,
-                    items:         info
-                        .into_iter()
-                        .filter(|v| !deps.contains(&v.name.as_str()))
-                        .enumerate()
-                        .map(|(i, v)| {
-                            CompletionItem {
-                                label: format!("{i}. {}", v.name.clone()),
-                                // kind: Some(CompletionItemKind::MODULE),
-                                detail: v.description,
-                                // preselect:
-                                // Some(v.exact_match),
-                                sort_text: Some(format!("{:06}", i)),
-                                text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-                                    range:    Range {
-                                        start: Position {
-                                            line:      start.0 as u32,
-                                            character: start.1 as u32,
-                                        },
-                                        end:   Position {
-                                            line:      end.0 as u32,
-                                            character: end.1 as u32,
-                                        },
-                                    },
-                                    new_text: {
-                                        let mut dep = dep.data.clone();
-                                        dep.set_name(v.name);
-                                        if let DepSource::None = dep.source
-                                        {
-                                            match workspace.is_some()
-                                            {
-                                                true =>
-                                                {
-                                                    dep.source =
-                                                        DepSource::Workspace(Default::default())
-                                                }
-                                                false =>
-                                                {
-                                                    let ver = match lock.config.stable_version
-                                                    {
-                                                        true =>
-                                                        {
-                                                            v.max_stable_version.or(v.max_version)
-                                                        }
-                                                        false =>
-                                                        {
-                                                            v.max_version.or(v.max_stable_version)
-                                                        }
-                                                    }
-                                                    .unwrap_or_default();
-                                                    let ver =
-                                                        dependency_requirement(&ver).to_owned();
-                                                    dep.source = DepSource::Version {
-                                                        value:    OptionalKey::no_key(
-                                                            Positioned::new(0, 0, ver),
-                                                        ),
-                                                        registry: None,
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        dep.to_string()
-                                    },
-                                })),
-                                ..Default::default()
-                            }
-                        })
-                        .collect(),
-                })));
-                return out;
-            }
-            if let DepSource::Version { value, registry } = &dep.data.source
-            {
-                if value.value.contains(pos)
-                {
-                    let start = try_option!(lock.get_offset(&uri, dep.start as usize));
-                    let end = try_option!(lock.get_offset(&uri, dep.end as usize));
-                    let end_ = pos.saturating_sub(value.value.start as usize + 1);
-                    let slice = value.value.data.get(..end_).unwrap_or(&value.value.data);
-                    let info = self
-                        .info
-                        .get_info(
-                            registry.as_ref().map(|v| v.value.data.as_str()),
-                            &dep.data.crate_name(),
-                        )
-                        .await
-                        .unwrap_or_default();
-                    return Ok(Some(CompletionResponse::List(CompletionList {
-                        is_incomplete: true,
-                        items:         info
-                            .into_iter()
-                            .rev()
-                            .filter(|v| v.vers.starts_with(slice))
-                            .enumerate()
-                            .map(|(i, v)| {
-                                CompletionItem {
-                                    label: v.vers.clone(),
-                                    kind: Some(CompletionItemKind::MODULE),
-                                    detail: None,
-                                    sort_text: Some(format!("{:06}", i)),
-                                    text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-                                        range:    Range::new(
-                                            Position {
-                                                line:      start.0 as u32,
-                                                character: start.1 as u32,
-                                            },
-                                            Position {
-                                                line:      end.0 as u32,
-                                                character: end.1 as u32,
-                                            },
-                                        ),
-                                        new_text: {
-                                            let mut dep = dep.data.clone();
-                                            dep.source.set_version(OptionalKey::no_key(
-                                                Positioned::new(0, 0, v.vers),
-                                            ));
-                                            dep.to_string()
-                                        },
-                                    })),
-                                    ..Default::default()
-                                }
-                            })
-                            .collect(),
-                    })));
-                }
-            }
-
-            if let Some(feat) = dep.data.features.data.iter().find(|v| v.contains(pos))
-            {
-                let end = pos.saturating_sub(feat.start as usize + 1);
-                let slice = feat.data.get(..end).unwrap_or(&feat.data);
-                let src = if let DepSource::Workspace(_) = &dep.data.source
-                {
-                    workspace.and_then(|v| {
-                        v.dependencies
-                            .iter()
-                            .find(|v| v.data.name() == dep.data.crate_name())
-                            .map(|v| &v.data.source)
-                    })
-                }
-                else
-                {
-                    Some(&dep.data.source)
-                };
-                if let Some(DepSource::Version { value, registry }) = &src
-                {
-                    let version = RustVersion::try_from(value.value.data.as_str()).ok();
-                    let features = self
-                        .info
-                        .get_info(
-                            registry.as_ref().map(|v| v.value.data.as_str()),
-                            &dep.data.crate_name(),
-                        )
-                        .await
-                        .unwrap_or_default()
-                        .into_iter()
-                        .rfind(|v| v.ver() == version)
-                        .map(|v| v.feature_all())
-                        .unwrap_or_default();
-
-                    let start = try_option!(lock.get_offset(&uri, feat.start as usize));
-                    let end = try_option!(lock.get_offset(&uri, feat.end as usize));
-                    return Ok(Some(CompletionResponse::List(CompletionList {
-                        is_incomplete: true,
-                        items:         features
-                            .into_iter()
-                            .filter(|v| v.starts_with(slice))
-                            .filter(|name| {
-                                dep.data
-                                    .features
-                                    .data
-                                    .iter()
-                                    .find(|v| &v.data == name)
-                                    .is_none()
-                            })
-                            .map(|v| {
-                                CompletionItem {
-                                    label: v.clone(),
-                                    kind: Some(CompletionItemKind::MODULE),
-                                    detail: None,
-                                    text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-                                        range:    Range::new(
-                                            Position {
-                                                line:      start.0 as u32,
-                                                character: start.1 as u32,
-                                            },
-                                            Position {
-                                                line:      end.0 as u32,
-                                                character: end.1 as u32,
-                                            },
-                                        ),
-                                        new_text: format!("\"{v}\""),
-                                    })),
-                                    ..Default::default()
-                                }
-                            })
-                            .collect(),
-                    })));
-                }
-            }
-        }
-        if let Some(feat) = toml.features.iter().find(|v| v.contains(pos))
-        {
-            // TODO: features
-        }
-
-        let path = lock
-            .get_path(
-                &uri,
-                params.text_document_position.position.line,
-                params.text_document_position.position.character,
-            )
-            .await;
-        if let Some(mut path) = path
-        {
-            let is_value = path
-                .pop()
-                .map(|v| v.is_value(path.last()))
-                .unwrap_or_default();
-            let p = path
-                .iter()
-                .map(|v| v.tyoe.to_string())
-                .collect::<Vec<String>>();
-            self.client
-                .log_message(MessageType::INFO, format!("{} {:?}", is_value, p))
-                .await;
-            let v = lock
-                .static_data
-                .completions(&p, 0, is_value)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|v| {
-                    CompletionItem {
-                        label: v,
-                        detail: None,
-                        text_edit: None,
-                        ..Default::default()
-                    }
-                });
-            return Ok(Some(CompletionResponse::List(CompletionList {
-                is_incomplete: true,
-                items:         v.collect(),
-            })));
-        }
-
-        Ok(None)
+        Ok(self.complete(&uri, position.position).await)
     }
 }
 
-pub async fn main(path: PathBuf)
+/// Serves the language server over stdin and stdout until
+/// the client exits.
+pub async fn main()
 {
-    let stdin = tokio::io::stdin();
-    let stdout = tokio::io::stdout();
-    let info = Arc::new(InfoProvider::new(50, false, path).await);
-    let (client, server) = LspService::build(|client| {
+    let info = Arc::new(InfoProvider::new(Config::default().per_page));
+    let (service, socket) = LspService::build(|client| {
         Context {
             client: client.clone(),
             db: Db::new(client, info.clone()),
@@ -1034,6 +572,7 @@ pub async fn main(path: PathBuf)
         }
     })
     .finish();
-
-    Server::new(stdin, stdout, server).serve(client).await;
+    Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
+        .serve(service)
+        .await;
 }
