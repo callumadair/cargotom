@@ -2,7 +2,15 @@
 name = "cargotom"
 version.workspace = true
 edition.workspace = true
+description = "Language server for Cargo.toml files, served over stdin and stdout"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 lsp.workspace = true
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

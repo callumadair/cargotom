@@ -1,225 +1,370 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+//! Code actions for the dependency under the cursor.
 
-use tokio::sync::RwLockReadGuard;
-
-use parser::{
-    structs::version::is_newer,
-    toml::{DepSource, Dependency, DependencyKind, Positioned},
-    tree::RangeExclusive,
-    Db,
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::Arc,
 };
+
+use cargo::GlobalContext;
 use cargo_util_schemas::core::PartialVersion;
+use info_provider::suggestable;
+use parser::{
+    Db,
+    structs::version::is_newer,
+    toml::{
+        DepSource,
+        Dependency,
+        DependencyKind,
+        ManifestTextError,
+        Positioned,
+    },
+    tree::ByteSpan,
+};
 use tower_lsp::lsp_types::{
-    CodeAction, CodeActionKind, Position, Range, TextEdit, Url, WorkspaceEdit,
+    CodeAction,
+    CodeActionKind,
+    MessageType,
+    Position,
+    Range,
+    TextEdit,
+    Url,
+    WorkspaceEdit,
 };
 
-use crate::lsp::Context;
+use crate::{
+    lsp::Context,
+    utils::{
+        command_action,
+        report,
+    },
+};
 
 /// Returns the directory that holds the manifest at `uri`.
-pub(crate) fn manifest_dir(uri: &Url) -> Option<PathBuf> {
+pub(crate) fn manifest_dir(uri: &Url) -> Option<PathBuf>
+{
     Some(uri.to_file_path().ok()?.parent()?.to_path_buf())
 }
 
-impl Context {
-    pub fn upgrade_dep(
-        &self,
-        uri: &Url,
-        version: &Positioned<String>,
-        ver: Option<semver::Version>,
-        lock: &RwLockReadGuard<Db>,
-    ) -> Option<CodeAction> {
-        let ver = ver?;
-        let version_parsed = version.data.parse::<PartialVersion>().ok()?;
-        if !is_newer(&version_parsed, &ver) {
-            return None;
-        }
-        let start = lock.get_offset(uri, version.start as usize)?;
-        let end = lock.get_offset(uri, version.end as usize)?;
+/// The code actions for one dependency. The edits and links
+/// need only the db, and `lookup` needs a registry lookup
+/// after the db lock is released.
+#[derive(Default)]
+pub(crate) struct DepActions
+{
+    /// Actions that edit the manifest.
+    pub edits:  Vec<CodeAction>,
+    /// Actions that open a page of the crate.
+    pub links:  Vec<CodeAction>,
+    /// The action that a registry lookup completes.
+    pub lookup: Option<Lookup>,
+}
 
-        Some(CodeAction {
-            title: "Upgrade".to_owned(),
-            kind: Some(CodeActionKind::EMPTY),
-            edit: Some(WorkspaceEdit {
-                changes: Some(
-                    vec![(
-                        uri.clone(),
-                        vec![TextEdit {
-                            range: Range::new(
-                                Position {
-                                    line: start.0 as u32,
-                                    character: start.1 as u32,
-                                },
-                                Position {
-                                    line: end.0 as u32,
-                                    character: end.1 as u32,
-                                },
-                            ),
-                            new_text: format!("\"{}\"", ver.to_owned()),
-                        }],
-                    )]
-                    .into_iter()
-                    .collect(),
-                ),
-                ..Default::default()
-            }),
-            ..Default::default()
-        })
+/// An action that needs the published versions of a crate.
+pub(crate) enum Lookup
+{
+    /// Replaces the requirement at `range` with the newest
+    /// version.
+    Upgrade
+    {
+        uri:         Url,
+        registry:    Option<String>,
+        name:        String,
+        requirement: PartialVersion,
+        range:       Range,
+        stable_only: bool,
+    },
+    /// Adds the crate to the workspace root at `at`.
+    AddToWorkspace
+    {
+        root:        Url,
+        name:        String,
+        at:          Position,
+        stable_only: bool,
+    },
+}
+
+/// Returns an action that applies `edits`.
+fn edit_action(
+    title: impl Into<String>,
+    edits: HashMap<Url, Vec<TextEdit>>,
+) -> CodeAction
+{
+    CodeAction {
+        title: title.into(),
+        kind: Some(CodeActionKind::EMPTY),
+        edit: Some(WorkspaceEdit {
+            changes: Some(edits),
+            ..WorkspaceEdit::default()
+        }),
+        ..CodeAction::default()
     }
-    fn dep_workspace_actions(
-        &self,
-        uri: &Url,
-        dep: &Positioned<parser::toml::Dependency>,
-        range: &Range,
-        lock: &RwLockReadGuard<Db>,
-    ) -> Option<Vec<CodeAction>> {
-        if let DepSource::Workspace(_) = dep.data.source {
-            return None;
-        }
-        let workspace_uri = lock.get_workspace(uri)?;
-        let workspace = lock.get_toml(workspace_uri)?;
-        let member_dir = manifest_dir(uri)?;
-        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-        if workspace
-            .dependencies
-            .iter()
-            .find(|v| v.data.name() == dep.data.crate_name())
-            .is_none()
+}
+
+/// Returns an action that replaces `range` of `uri` with
+/// `new_text`.
+fn replace_action(
+    title: impl Into<String>,
+    uri: &Url,
+    range: Range,
+    new_text: String,
+) -> CodeAction
+{
+    edit_action(
+        title,
+        HashMap::from([(uri.clone(), vec![TextEdit::new(range, new_text)])]),
+    )
+}
+
+/// Returns the actions for the dependency that overlaps
+/// `range`, or `None` when no dependency does.
+///
+/// # Errors
+///
+/// Returns [`ManifestTextError`] when cargo cannot write an
+/// edited dependency.
+pub(crate) fn dep_actions(
+    db: &Db,
+    gctx: &GlobalContext,
+    uri: &Url,
+    range: Range,
+) -> Result<Option<DepActions>, ManifestTextError>
+{
+    let Some(dep) = db.get_dependency(uri, range)
+    else
+    {
+        return Ok(None);
+    };
+    let (Some(dep_range), Some(dir)) = (db.get_range(uri, dep.into()), manifest_dir(uri))
+    else
+    {
+        return Ok(None);
+    };
+    let mut actions = DepActions::default();
+    let name = dep.data.crate_name();
+    let stable_only = db.config.stable_version;
+    match &dep.data.source
+    {
+        DepSource::Version { value, registry } =>
         {
-            let last = workspace.dependencies.last()?;
-            let line = lock.get_line(workspace_uri, last.end as usize)? as u32 + 1;
-            let dep = Dependency {
-                name: dep.data.name.clone(),
-                package: dep.data.package.clone(),
-                kind: DependencyKind::Normal,
-                source: dep.data.source.clone(),
-                features: Positioned::new(0, 0, Vec::new()),
-                features_key_range: None,
-                default_features: None,
-                typing_keys: Vec::new(),
-                optional: None,
-                expanded: true,
-                target: Arc::default(),
-            };
-            changes
-                .entry(workspace_uri.clone())
-                .or_default()
-                .push(TextEdit {
-                    range: Range {
-                        start: Position { line, character: 0 },
-                        end: Position { line, character: 0 },
-                    },
-                    new_text: format!(
-                        "{}\n",
-                        dep.to_manifest_text(&member_dir, &manifest_dir(workspace_uri)?)?
-                    ),
+            let version = &value.value;
+            actions.lookup = version
+                .data
+                .parse()
+                .ok()
+                .zip(db.get_range(uri, version.into()))
+                .map(|(requirement, range)| {
+                    Lookup::Upgrade {
+                        uri: uri.clone(),
+                        registry: registry.as_ref().map(|v| v.data.clone()),
+                        name: name.clone(),
+                        requirement,
+                        range,
+                        stable_only,
+                    }
                 });
+            let version = &version.data;
+            actions.links = vec![
+                command_action(
+                    "Open Documentation",
+                    "open_url",
+                    vec![format!("https://docs.rs/{name}/{version}/").into()],
+                ),
+                command_action(
+                    "Open Source",
+                    "open-src",
+                    vec![name.clone().into(), version.clone().into()],
+                ),
+                command_action(
+                    "Open crates.io",
+                    "open_url",
+                    vec![format!("https://crates.io/crates/{name}").into()],
+                ),
+            ];
         }
-        let mut data = dep.data.clone();
-        data.source = DepSource::Workspace(RangeExclusive::default());
-        changes.entry(uri.clone()).or_default().push(TextEdit {
-            range: *range,
-            new_text: data.to_manifest_text(&member_dir, &member_dir)?,
-        });
-        let make = CodeAction {
-            title: "Make to workspace dependency".to_owned(),
-            kind: Some(CodeActionKind::EMPTY),
-            edit: {
-                Some(WorkspaceEdit {
-                    change_annotations: None,
-                    document_changes: None,
-                    changes: Some(changes),
-                })
-            },
-            ..CodeAction::default()
-        };
-        Some(vec![make])
+        DepSource::Workspace(_) =>
+        {
+            let root = db.get_workspace(uri);
+            let root_toml = root.and_then(|v| db.get_toml(v));
+            if let (Some(root), Some(root_toml)) = (root, root_toml)
+                && !root_toml.dependencies.iter().any(|v| v.data.name() == name)
+                && let Some(at) = root_toml
+                    .dependencies
+                    .last()
+                    .and_then(|last| db.get_offset(root, last.end as usize))
+            {
+                actions.lookup = Some(Lookup::AddToWorkspace {
+                    root: root.clone(),
+                    name: name.clone(),
+                    at,
+                    stable_only,
+                });
+            }
+        }
+        _ =>
+        {}
     }
-    pub fn dep_actions(
-        &self,
-        uri: &Url,
-        dep: &Positioned<parser::toml::Dependency>,
-        lock: &RwLockReadGuard<Db>,
-    ) -> Option<Vec<CodeAction>> {
-        let start = lock.get_offset(uri, dep.start as usize)?;
-        let end = lock.get_offset(uri, dep.end as usize)?;
-        let dir = manifest_dir(uri)?;
-        let mut data1 = dep.data.clone();
-        let mut data2 = dep.data.clone();
-        let mut res = vec![];
-        let range = Range::new(
-            Position {
-                line: start.0 as u32,
-                character: start.1 as u32,
-            },
-            Position {
-                line: end.0 as u32,
-                character: end.1 as u32,
-            },
+    if let Some(action) = make_workspace_dependency(db, gctx, uri, dep, dep_range)?
+    {
+        actions.edits.push(action);
+    }
+
+    let mut expanded = dep.data.clone();
+    expanded.expanded = !expanded.expanded;
+    expanded.optional = None;
+    let title = if dep.data.expanded
+    {
+        "Collapse"
+    }
+    else
+    {
+        "Expand"
+    };
+    let text = expanded.to_manifest_text(gctx, &dir, &dir)?;
+    actions
+        .edits
+        .push(replace_action(title, uri, dep_range, text));
+
+    let mut optional = dep.data.clone();
+    let is_optional = optional.optional.is_some_and(|v| v.data);
+    optional.optional = Some(Positioned::new(0, 0, !is_optional));
+    let title = if is_optional
+    {
+        "Remove optional"
+    }
+    else
+    {
+        "Make optional"
+    };
+    let text = optional.to_manifest_text(gctx, &dir, &dir)?;
+    actions
+        .edits
+        .push(replace_action(title, uri, dep_range, text));
+    Ok(Some(actions))
+}
+
+/// Returns the action that moves `dep` to the workspace
+/// root and points the member at it, or `None` when `dep`
+/// already uses the workspace or the member has no root.
+fn make_workspace_dependency(
+    db: &Db,
+    gctx: &GlobalContext,
+    uri: &Url,
+    dep: &Positioned<Dependency>,
+    range: Range,
+) -> Result<Option<CodeAction>, ManifestTextError>
+{
+    if let DepSource::Workspace(_) = dep.data.source
+    {
+        return Ok(None);
+    }
+    let Some(root) = db.get_workspace(uri)
+    else
+    {
+        return Ok(None);
+    };
+    let (Some(root_toml), Some(member_dir), Some(root_dir)) =
+        (db.get_toml(root), manifest_dir(uri), manifest_dir(root))
+    else
+    {
+        return Ok(None);
+    };
+    let name = dep.data.crate_name();
+    let mut edits: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    if !root_toml.dependencies.iter().any(|v| v.data.name() == name)
+    {
+        let Some(at) = root_toml
+            .dependencies
+            .last()
+            .and_then(|last| db.get_offset(root, last.end as usize))
+        else
+        {
+            return Ok(None);
+        };
+        let root_dep = Dependency {
+            name:               dep.data.name.clone(),
+            package:            dep.data.package.clone(),
+            kind:               DependencyKind::Normal,
+            source:             dep.data.source.clone(),
+            features:           Positioned::new(0, 0, Vec::new()),
+            features_key_range: None,
+            default_features:   None,
+            typing_keys:        Vec::new(),
+            optional:           None,
+            expanded:           true,
+            target:             Arc::default(),
+        };
+        let text = root_dep.to_manifest_text(gctx, &member_dir, &root_dir)?;
+        edits.insert(
+            root.clone(),
+            vec![TextEdit::new(Range::new(at, at), format!("\n{text}"))],
         );
-        if let Some(v) = self.dep_workspace_actions(uri, dep, &range, lock) {
-            res.extend(v);
+    }
+    let mut member = dep.data.clone();
+    member.source = DepSource::Workspace(ByteSpan::default());
+    let text = member.to_manifest_text(gctx, &member_dir, &member_dir)?;
+    edits
+        .entry(uri.clone())
+        .or_default()
+        .push(TextEdit::new(range, text));
+    Ok(Some(edit_action("Make to workspace dependency", edits)))
+}
+
+impl Context
+{
+    /// Fetches the versions that `lookup` needs and returns
+    /// its action, or `None` when no version qualifies. A
+    /// failed fetch is logged.
+    pub(crate) async fn lookup_action(
+        &self,
+        lookup: Lookup,
+    ) -> Option<CodeAction>
+    {
+        let (registry, name, stable_only) = match &lookup
+        {
+            Lookup::Upgrade {
+                registry,
+                name,
+                stable_only,
+                ..
+            } => (registry.as_deref(), name.as_str(), *stable_only),
+            Lookup::AddToWorkspace {
+                name, stable_only, ..
+            } => (None, name.as_str(), *stable_only),
+        };
+        let versions = match self.info.get_info(registry, name).await
+        {
+            Ok(v) => v,
+            Err(e) =>
+            {
+                self.client
+                    .log_message(MessageType::WARNING, report(e.as_ref()))
+                    .await;
+                return None;
+            }
+        };
+        let newest = suggestable(&versions, stable_only).next_back()?.version();
+        match lookup
+        {
+            Lookup::Upgrade {
+                uri,
+                requirement,
+                range,
+                ..
+            } =>
+            {
+                is_newer(&requirement, newest)
+                    .then(|| replace_action("Upgrade", &uri, range, format!("\"{newest}\"")))
+            }
+            Lookup::AddToWorkspace { root, name, at, .. } =>
+            {
+                Some(replace_action(
+                    "Add to workspace",
+                    &root,
+                    Range::new(at, at),
+                    format!("\n{name} = \"{newest}\""),
+                ))
+            }
         }
-        let expand = CodeAction {
-            title: match data1.expanded {
-                true => "Collapse",
-                false => "Expand",
-            }
-            .to_owned(),
-            kind: Some(CodeActionKind::EMPTY),
-            edit: {
-                data1.expanded = !data1.expanded;
-                data1.optional = None;
-                Some(WorkspaceEdit {
-                    change_annotations: None,
-                    document_changes: None,
-                    changes: Some(
-                        vec![(
-                            uri.clone(),
-                            vec![TextEdit {
-                                range,
-                                new_text: data1.to_manifest_text(&dir, &dir)?,
-                            }],
-                        )]
-                        .into_iter()
-                        .collect(),
-                    ),
-                })
-            },
-            ..CodeAction::default()
-        };
-        let optional = CodeAction {
-            title: match data2.optional.map(|v| v.data).unwrap_or_default() {
-                true => "Remove optional",
-                false => "Make optional",
-            }
-            .to_owned(),
-            kind: Some(CodeActionKind::EMPTY),
-            edit: {
-                if let Some(opt) = &mut data2.optional {
-                    opt.data = !opt.data;
-                } else {
-                    data2.optional = Some(Positioned::new(0, 0, true))
-                }
-                Some(WorkspaceEdit {
-                    change_annotations: None,
-                    document_changes: None,
-                    changes: Some(
-                        vec![(
-                            uri.clone(),
-                            vec![TextEdit {
-                                range,
-                                new_text: data2.to_manifest_text(&dir, &dir)?,
-                            }],
-                        )]
-                        .into_iter()
-                        .collect(),
-                    ),
-                })
-            },
-            ..CodeAction::default()
-        };
-        res.push(expand);
-        res.push(optional);
-        Some(res)
     }
 }

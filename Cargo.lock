@@ -148,17 +148,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-recursion"
-version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f8abc12baad266b1c8cec146854c195b5864b4221d4b2ca7296a7ae82d9e451"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.10",
-]
-
-[[package]]
 name = "async-trait"
 version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2501,15 +2490,16 @@ dependencies = [
 name = "info-provider"
 version = "2.3.14"
 dependencies = [
- "anyhow",
  "cargo",
  "cargo-util-terminal",
  "crates-io",
+ "futures",
  "html2md",
  "http",
  "rstest",
  "serde",
  "serde_json",
+ "snafu",
  "tempfile",
  "tokio",
  "wiremock",
@@ -2823,12 +2813,14 @@ dependencies = [
 name = "lsp"
 version = "2.3.14"
 dependencies = [
+ "cargo",
  "cargo-util-schemas",
  "info-provider",
  "parser",
  "semver",
  "serde",
  "serde_json",
+ "snafu",
  "tokio",
  "tower-lsp",
  "webbrowser",
@@ -3291,11 +3283,11 @@ dependencies = [
 name = "parser"
 version = "2.3.14"
 dependencies = [
- "async-recursion",
  "cargo",
  "cargo-platform",
  "cargo-util",
  "cargo-util-schemas",
+ "cargo-util-terminal",
  "derive_more",
  "indexmap",
  "info-provider",
@@ -3305,6 +3297,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "snafu",
  "strum",
  "taplo",
  "tempfile",
@@ -3973,6 +3966,27 @@ name = "smallvec"
 version = "1.16.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3244542535d5de959d90ec55d1b5ff0fd2bb7b1310223907d5f11932847f7b59"
+
+[[package]]
+name = "snafu"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e45cb604038abb7b926b679887b3226d8d0f23874b66623625a0454be425a4b7"
+dependencies = [
+ "snafu-derive",
+]
+
+[[package]]
+name = "snafu-derive"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "287f59010008f0d7cf5e3b03196d666c1acc46c8d3e9cf34c28a1a7157601e72"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "socket2"
@@ -4930,8 +4944,3 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
-
-[[patch.unused]]
-name = "html2md"
-version = "0.2.15"
-source = "git+https://gitlab.com/o0Frederik0o/html2md.git#a50c50b5b98d4360257002b23d967471001ef0df"

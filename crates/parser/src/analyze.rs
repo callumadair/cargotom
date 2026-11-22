@@ -1,288 +1,288 @@
-use std::collections::HashMap;
-
-use async_recursion::async_recursion;
-use info_provider::CacheItemOut;
-use cargo_util_schemas::core::PartialVersion;
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
-
-use crate::{
-    structs::version::is_newer, toml::DepSource, tree::RangeExclusive, Db, Level, Uri, Warning,
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        Weak,
+    },
 };
 
-fn crate_not_found_message(registry: Option<&str>, name: &str) -> String {
-    match registry {
+use cargo_util_schemas::core::PartialVersion;
+use info_provider::{
+    CacheItemOut,
+    InfoProvider,
+    suggestable,
+};
+use tokio::sync::RwLock;
+use tower_lsp::lsp_types::{
+    Diagnostic,
+    DiagnosticSeverity,
+    MessageType,
+    Position,
+    Range,
+};
+
+use crate::{
+    Db,
+    Uri,
+    structs::version::is_newer,
+    toml::DepSource,
+    tree::ByteSpan,
+};
+
+const DOCS_INFO_MESSAGE: &str = "\nThe first line of every Cargo.toml has code actions that will \
+                                 open docs/issues for the cargotom lsp.\n\n To hide this message \
+                                 please set hide_docs_info_message. \n\nFor further information \
+                                 please check out the docs";
+
+fn crate_not_found_message(
+    registry: Option<&str>,
+    name: &str,
+) -> String
+{
+    match registry
+    {
         Some(registry) => format!("crate {name} not found in registry {registry}"),
         None => format!("crate {name} not found on crates.io"),
     }
 }
 
-impl Db {
-    /// Checks the dependencies and features of `uri`, or of every open
-    /// document when `uri` is `None`, and publishes the diagnostics.
+/// A crate to fetch: its registry, where `None` is
+/// crates.io, and its name.
+type Missing = (Option<String>, String);
+
+impl Db
+{
+    /// Checks the dependencies and features of `uri`, or of
+    /// every open document when `uri` is `None`, and
+    /// publishes the diagnostics.
     ///
-    /// # Panics
-    ///
-    /// Panics when [`Db::sel`] is unset and a crate lookup must start.
-    pub async fn analyze(&self, uri: Option<Uri>) {
-        let _ = self.client.inlay_hint_refresh().await;
-        if let Some(uri) = &uri {
-            self.analyze_single(uri).await;
-        } else {
-            for item in self.files.keys() {
-                self.analyze_single(item).await;
+    /// A crate that no lookup has fetched yet starts one
+    /// fetch in the background, which analyses the document
+    /// again when it ends.
+    pub async fn analyze(
+        &self,
+        uri: Option<Uri>,
+    )
+    {
+        if let Err(e) = self.client.inlay_hint_refresh().await
+        {
+            self.client
+                .log_message(
+                    MessageType::WARNING,
+                    format!("inlay hint refresh failed: {e}"),
+                )
+                .await;
+        }
+        match &uri
+        {
+            Some(uri) => self.analyze_single(uri).await,
+            None =>
+            {
+                for item in self.files.keys()
+                {
+                    self.analyze_single(item).await;
+                }
             }
         }
     }
-    #[async_recursion]
-    async fn analyze_single(&self, uri: &Uri) -> Option<()> {
-        let toml = self.tomls.get(uri)?;
-        let mut errors = vec![];
-        let mut warnings = vec![];
+
+    async fn analyze_single(
+        &self,
+        uri: &Uri,
+    )
+    {
+        let Some(toml) = self.tomls.get(uri)
+        else
+        {
+            return;
+        };
+        let mut errors: Vec<(ByteSpan, String)> = vec![];
+        let mut warnings: Vec<(ByteSpan, String)> = vec![];
+        let mut missing: Vec<Missing> = vec![];
         let mut names: HashMap<String, Vec<_>> = HashMap::new();
         let workspace = self.workspaces.get(uri).and_then(|v| self.tomls.get(v));
 
-        for toml in &toml.dependencies {
-            let mut features: HashMap<String, Vec<_>> = HashMap::new();
-            for feature in &toml.data.features.data {
-                features
-                    .entry(feature.data.clone())
-                    .or_default()
-                    .push(feature.clone());
+        for dep in &toml.dependencies
+        {
+            let mut features: HashMap<&str, Vec<_>> = HashMap::new();
+            for feature in &dep.data.features.data
+            {
+                features.entry(&feature.data).or_default().push(feature);
             }
-            for (_, features) in features {
-                if features.len() > 1 {
-                    for feature in features {
-                        errors.push((
-                            RangeExclusive::from(&feature),
-                            "Duplicate feature name".to_string(),
-                        ));
-                    }
-                }
+            for feature in features.into_values().filter(|v| v.len() > 1).flatten()
+            {
+                errors.push((feature.into(), "Duplicate feature name".to_owned()));
             }
-            let targets: Vec<_> = toml
-                .data
-                .target
-                .iter()
-                .map(|v| v.data.to_string())
-                .collect();
-            let targets = targets.join(" ");
+            let targets: Vec<_> = dep.data.target.iter().map(|v| v.data.to_string()).collect();
             names
                 .entry(format!(
                     "{}{:?}{}",
-                    toml.data.name(),
-                    toml.data.kind,
-                    targets
+                    dep.data.name(),
+                    dep.data.kind,
+                    targets.join(" ")
                 ))
                 .or_default()
-                .push(toml)
+                .push(dep);
         }
-        for tomls in names.values() {
-            if tomls.len() > 1 {
-                for toml in tomls {
-                    errors.push((
-                        toml.data.crate_name_range(),
-                        "Duplicate dependency name".to_string(),
-                    ));
+        for dep in names.into_values().filter(|v| v.len() > 1).flatten()
+        {
+            errors.push((
+                dep.data.crate_name_range(),
+                "Duplicate dependency name".to_owned(),
+            ));
+        }
+
+        for dep in &toml.dependencies
+        {
+            let name = dep.data.crate_name();
+            let (source, range, from_workspace) = match &dep.data.source
+            {
+                DepSource::Workspace(range) =>
+                {
+                    let Some(workspace) = workspace
+                    else
+                    {
+                        errors.push((*range, "is not part of a workspace".to_owned()));
+                        continue;
+                    };
+                    let Some(root) = workspace
+                        .dependencies
+                        .iter()
+                        .find(|v| v.data.name() == name)
+                    else
+                    {
+                        errors.push((*range, "cannot find the crate in the workspace".to_owned()));
+                        continue;
+                    };
+                    (&root.data.source, Some(*range), true)
                 }
+                source => (source, source.range(), false),
+            };
+            let (DepSource::Version { value, registry }, Some(range)) = (source, range)
+            else
+            {
+                continue;
+            };
+            let registry = registry.as_ref().map(|v| v.data.as_str());
+            let items = match self.info.get_info_cache(registry, &name).await
+            {
+                CacheItemOut::Ready(items) => items,
+                CacheItemOut::Pending => continue,
+                CacheItemOut::NotStarted =>
+                {
+                    // The workspace root analysis fetches
+                    // its own crates.
+                    if !from_workspace
+                    {
+                        missing.push((registry.map(ToOwned::to_owned), name));
+                    }
+                    continue;
+                }
+                CacheItemOut::Error(e) =>
+                {
+                    let message = snafu::Report::from_error(e.as_ref()).to_string();
+                    errors.push((dep.data.crate_name_range(), message));
+                    continue;
+                }
+            };
+            if items.is_empty()
+            {
+                warnings.push((
+                    dep.data.crate_name_range(),
+                    crate_not_found_message(registry, &name),
+                ));
+                continue;
+            }
+            let Ok(requirement) = value.value.data.parse::<PartialVersion>()
+            else
+            {
+                continue;
+            };
+            let Some(package) = items.iter().rfind(|v| requirement.matches(v.version()))
+            else
+            {
+                errors.push((range, "Invalid version".to_owned()));
+                continue;
+            };
+            for feature in &dep.data.features.data
+            {
+                if !package.features().contains_key(feature.data.as_str())
+                {
+                    errors.push((feature.into(), "Unknown Feature".to_owned()));
+                }
+            }
+            let newer = suggestable(&items, self.config.stable_version)
+                .rfind(|v| is_newer(&requirement, v.version()));
+            if let Some(newer) = newer.filter(|_| self.config.outdated_crate_warnings)
+            {
+                warnings.push((
+                    range,
+                    format!("Newer version available: {}", newer.version()),
+                ));
             }
         }
 
-        for toml in &toml.dependencies {
-            let src = if let DepSource::Workspace(range) = &toml.data.source {
-                workspace.as_ref().and_then(|v| {
-                    v.dependencies
-                        .iter()
-                        .find(|v| v.data.name() == toml.data.crate_name())
-                        .map(|v| (&v.data.source, Some(*range), true))
+        if !missing.is_empty()
+        {
+            refetch(self.this.clone(), self.info.clone(), uri.clone(), missing);
+        }
+
+        let info = (!self.config.hide_docs_info_message).then(|| {
+            Diagnostic {
+                range: Range::new(Position::new(0, 0), Position::new(1, 0)),
+                severity: Some(DiagnosticSeverity::INFORMATION),
+                message: DOCS_INFO_MESSAGE.to_owned(),
+                ..Default::default()
+            }
+        });
+        let found = warnings
+            .into_iter()
+            .map(|v| (DiagnosticSeverity::WARNING, v))
+            .chain(errors.into_iter().map(|v| (DiagnosticSeverity::ERROR, v)))
+            .filter_map(|(severity, (span, message))| {
+                Some(Diagnostic {
+                    range: self.get_range(uri, span)?,
+                    severity: Some(severity),
+                    message,
+                    ..Default::default()
                 })
-            } else {
-                Some((&toml.data.source, toml.data.source.range(), false))
-            };
-            if let Some((DepSource::Version { value, registry }, range, workspace)) = src {
-                let range = range.unwrap();
-                let info = self
-                    .info
-                    .get_info_cache(
-                        registry.as_ref().map(|v| v.data.as_str()),
-                        &toml.data.crate_name(),
-                    )
-                    .await;
-                match info {
-                    CacheItemOut::Error(e) => errors.push((toml.data.crate_name_range(), e)),
-                    CacheItemOut::Pending => {}
-                    CacheItemOut::NotStarted => {
-                        let info = self.info.clone();
-                        let reg = registry.as_ref().map(|v| v.data.to_string());
-                        let name = toml.data.crate_name();
-                        let uri = uri.clone();
-                        let sel = self.sel.clone().unwrap();
-                        if !workspace {
-                            tokio::spawn(async move {
-                                //rerun in thread
-                                let v = matches!(
-                                    info.get_info_cache(reg.as_deref(), &name).await,
-                                    CacheItemOut::NotStarted
-                                );
-                                if v {
-                                    let _ = info.get_info(reg.as_deref(), &name).await;
-                                }
-                                let lock = sel.read().await;
-                                lock.analyze_single(&uri).await;
-                            });
-                        }
-                    }
-                    CacheItemOut::Ready(items) => {
-                        if items.is_empty() {
-                            warnings.push((
-                                toml.data.crate_name_range(),
-                                crate_not_found_message(
-                                    registry.as_ref().map(|v| v.data.as_str()),
-                                    &toml.data.crate_name(),
-                                ),
-                            ));
-                            continue;
-                        }
-                        let ver = value.value.data.parse::<PartialVersion>();
-                        if let Ok(ver) = ver {
-                            let versions = items
-                                .iter()
-                                .map(|v| (v, v.version()))
-                                .collect::<Vec<_>>();
-                            if let Some((package, ..)) =
-                                versions.iter().rfind(|(_, v)| ver.matches(v))
-                            {
-                                for feature in &toml.data.features.data {
-                                    if !package.features().contains_key(feature.data.as_str()) {
-                                        errors.push((
-                                            RangeExclusive::from(feature),
-                                            "Unknown Feature".to_string(),
-                                        ))
-                                    }
-                                }
-                                if let Some((info, _)) = versions
-                                    .iter()
-                                    .filter(|v| match self.config.stable_version {
-                                        true => v.1.pre.is_empty(),
-                                        false => true,
-                                    })
-                                    .rfind(|(_, v)| is_newer(&ver, v))
-                                {
-                                    if self.config.outdated_crate_warnings {
-                                        warnings.push((
-                                            range,
-                                            format!("Newer version available: {}", info.version()),
-                                        ))
-                                    }
-                                }
-                            } else {
-                                errors.push((range, "Invalid version".to_string()))
-                            }
-                        }
-                    }
-                }
-            } else if let DepSource::Workspace(range) = &toml.data.source {
-                match workspace {
-                    Some(w) => {
-                        if w.dependencies
-                            .iter()
-                            .find(|v| v.data.name() == toml.data.crate_name())
-                            .is_none()
-                        {
-                            errors.push((*range, "coundt find crate in workspace".to_string()));
-                        }
-                    }
-                    None => errors.push((*range, "isnt part of a workspace".to_string())),
-                }
-            }
-        }
-        let mut warn = vec![];
-        for (range, msg) in warnings {
-            let start = self.get_offset(uri, range.start as usize);
-            let end = self.get_offset(uri, range.end as usize);
-            if let (Some(start), Some(end)) = (start, end) {
-                warn.push(Warning {
-                    level: crate::Level::Warn,
-                    msg,
-                    start,
-                    end,
-                });
-            }
-        }
-        for (range, msg) in errors {
-            let start = self.get_offset(uri, range.start as usize);
-            let end = self.get_offset(uri, range.end as usize);
-            if let (Some(start), Some(end)) = (start, end) {
-                warn.push(Warning {
-                    level: crate::Level::Error,
-                    msg,
-                    start,
-                    end,
-                });
-            }
-        }
-        let lock = self.warnings.write();
-        lock.await.insert(uri.clone(), warn.clone());
-        let hide_docs_info_message = self.config.hide_docs_info_message;
+            });
+        let diagnostics = info.into_iter().chain(found).collect();
         self.client
-            .publish_diagnostics(
-                uri.clone(),
-                to_diagnostics(hide_docs_info_message, warn),
-                None,
-            )
+            .publish_diagnostics(uri.clone(), diagnostics, None)
             .await;
-        Some(())
     }
 }
 
-fn to_diagnostics(hide_docs_info_message: bool, items: Vec<Warning>) -> Vec<Diagnostic> {
-    let mut d = match hide_docs_info_message {
-        false => vec![
-            Diagnostic {
-                range: Range {
-                        start: Position {
-                            line: 0,
-                            character: 0,
-                        },
-                        end: Position {
-                            line: 1,
-                            character: 0,
-                        }},
-                severity: Some(DiagnosticSeverity::INFORMATION),
-                code: None,
-                code_description: None,
-                source: None,
-                message: "\nThe first line of every Cargo.toml has code actions that will open docs/issues for the cargotom lsp.\n\n To hide this message please set hide_docs_info_message. \n\nFor further information please check out the docs".to_owned(),
-                related_information: None,
-                tags: None,
-                data: None,
+/// Fetches every crate in `missing` on one background task,
+/// then analyses `uri` again. A failed fetch is logged, and
+/// the cache keeps the error for the next analysis to show.
+fn refetch(
+    db: Weak<RwLock<Db>>,
+    info: Arc<InfoProvider>,
+    uri: Uri,
+    missing: Vec<Missing>,
+)
+{
+    tokio::spawn(async move {
+        let mut failures = vec![];
+        for (registry, name) in &missing
+        {
+            if let Err(e) = info.get_info(registry.as_deref(), name).await
+            {
+                failures.push(snafu::Report::from_error(e.as_ref()).to_string());
             }
-        ],
-        true => vec![],
-    };
-    for item in items {
-        d.push(Diagnostic {
-            range: Range {
-                start: Position {
-                    line: item.start.0 as u32,
-                    character: item.start.1 as u32,
-                },
-                end: Position {
-                    line: item.end.0 as u32,
-                    character: item.end.1 as u32,
-                },
-            },
-            severity: Some(match item.level {
-                Level::Warn => DiagnosticSeverity::WARNING,
-                Level::Error => DiagnosticSeverity::ERROR,
-            }),
-            code: None,
-            code_description: None,
-            source: None,
-            message: item.msg,
-            related_information: None,
-            tags: None,
-            data: None,
-        });
-    }
-    d
+        }
+        let Some(db) = db.upgrade()
+        else
+        {
+            return;
+        };
+        let db = db.read().await;
+        for failure in failures
+        {
+            db.client.log_message(MessageType::ERROR, failure).await;
+        }
+        db.analyze_single(&uri).await;
+    });
 }

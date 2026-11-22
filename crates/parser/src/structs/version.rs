@@ -1,21 +1,31 @@
 use cargo_util_schemas::core::PartialVersion;
-use semver::{Comparator, Op, Prerelease, Version};
+use semver::{
+    Comparator,
+    Op,
+    Prerelease,
+    Version,
+};
 
-/// Returns `true` when `version` is above every version that `requirement`
-/// matches.
+/// Returns `true` when `version` is above every version
+/// that `requirement` matches.
 ///
-/// Pre-releases count. For `1.2` this holds for `1.3.0` and `2.0.0-rc.1`, but
-/// not for `1.2.9`.
-pub fn is_newer(requirement: &PartialVersion, version: &Version) -> bool {
+/// Pre-releases count. For `1.2` this holds for `1.3.0` and
+/// `2.0.0-rc.1`, but not for `1.2.9`.
+pub fn is_newer(
+    requirement: &PartialVersion,
+    version: &Version,
+) -> bool
+{
     let above = Comparator {
-        op: Op::Greater,
+        op:    Op::Greater,
         major: requirement.major,
         minor: requirement.minor,
         patch: requirement.patch,
-        pre: requirement.pre.clone().unwrap_or_default(),
+        pre:   requirement.pre.clone().unwrap_or_default(),
     };
-    // semver never lets a pre-release satisfy a comparator on another
-    // major.minor.patch, so compare the release that the pre-release leads to.
+    // semver never lets a pre-release satisfy a comparator
+    // on another major.minor.patch, so compare the release
+    // that the pre-release leads to.
     let release = Version {
         pre: Prerelease::EMPTY,
         ..version.clone()
@@ -24,7 +34,8 @@ pub fn is_newer(requirement: &PartialVersion, version: &Version) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests
+{
     use rstest::rstest;
 
     use super::*;
@@ -42,9 +53,11 @@ mod tests {
         #[case] requirement: &str,
         #[case] version: &str,
         #[case] expected: bool,
-    ) {
-        let requirement = requirement.parse::<PartialVersion>().unwrap();
-        let version = version.parse().unwrap();
+    ) -> Result<(), Box<dyn std::error::Error>>
+    {
+        let requirement = requirement.parse::<PartialVersion>()?;
+        let version = version.parse()?;
         assert_eq!(is_newer(&requirement, &version), expected);
+        Ok(())
     }
 }

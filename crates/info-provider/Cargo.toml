@@ -2,15 +2,21 @@
 name = "info-provider"
 version.workspace = true
 edition.workspace = true
+description = "Registry and crates.io metadata lookups for the cargotom language server"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-anyhow.workspace = true
 cargo.workspace = true
 crates-io = "0.41.3"
+futures = { version = "0.3.34", default-features = false, features = ["executor"] }
 html2md.workspace = true
 http = "1.5"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+snafu.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 
 [dev-dependencies]
@@ -19,3 +25,6 @@ rstest = "0.26"
 tempfile = "3.27"
 tokio = { workspace = true, features = ["full"] }
 wiremock = "0.6"
+
+[lints]
+workspace = true
