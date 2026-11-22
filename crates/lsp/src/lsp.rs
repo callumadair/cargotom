@@ -833,7 +833,9 @@ impl LanguageServer for Context
                                                 }
                                             }
                                         }
-                                        dep.to_string()
+                                        crate::actions::manifest_dir(&uri)
+                                            .and_then(|dir| dep.to_manifest_text(&dir, &dir))
+                                            .unwrap_or_default()
                                     },
                                 })),
                                 ..Default::default()
@@ -888,7 +890,9 @@ impl LanguageServer for Context
                                             dep.source.set_version(OptionalKey::no_key(
                                                 Positioned::new(0, 0, v.vers),
                                             ));
-                                            dep.to_string()
+                                            crate::actions::manifest_dir(&uri)
+                                                .and_then(|dir| dep.to_manifest_text(&dir, &dir))
+                                                .unwrap_or_default()
                                         },
                                     })),
                                     ..Default::default()

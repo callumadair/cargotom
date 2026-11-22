@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use parser::{
     lock::LoggedReadGuard,
@@ -13,6 +13,11 @@ use tower_lsp::lsp_types::{
 };
 
 use crate::lsp::Context;
+
+/// Returns the directory that holds the manifest at `uri`.
+pub(crate) fn manifest_dir(uri: &Url) -> Option<PathBuf> {
+    Some(uri.to_file_path().ok()?.parent()?.to_path_buf())
+}
 
 impl Context {
     pub fn upgrade_dep(
@@ -71,6 +76,7 @@ impl Context {
         }
         let workspace_uri = lock.get_workspace(uri)?;
         let workspace = lock.get_toml(workspace_uri)?;
+        let member_dir = manifest_dir(uri)?;
         let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
         if workspace
             .dependencies
@@ -101,14 +107,17 @@ impl Context {
                         start: Position { line, character: 0 },
                         end: Position { line, character: 0 },
                     },
-                    new_text: format!("{}\n", dep.to_string()),
+                    new_text: format!(
+                        "{}\n",
+                        dep.to_manifest_text(&member_dir, &manifest_dir(workspace_uri)?)?
+                    ),
                 });
         }
         let mut data = dep.data.clone();
         data.source = DepSource::Workspace(RangeExclusive::default());
         changes.entry(uri.clone()).or_default().push(TextEdit {
             range: range.clone(),
-            new_text: data.to_string(),
+            new_text: data.to_manifest_text(&member_dir, &member_dir)?,
         });
         let make = CodeAction {
             title: "Make to workspace dependency".to_owned(),
@@ -132,6 +141,7 @@ impl Context {
     ) -> Option<Vec<CodeAction>> {
         let start = lock.get_offset(uri, dep.start as usize)?;
         let end = lock.get_offset(uri, dep.end as usize)?;
+        let dir = manifest_dir(uri)?;
         let mut data1 = dep.data.clone();
         let mut data2 = dep.data.clone();
         let mut res = vec![];
@@ -166,7 +176,7 @@ impl Context {
                             uri.clone(),
                             vec![TextEdit {
                                 range,
-                                new_text: data1.to_string(),
+                                new_text: data1.to_manifest_text(&dir, &dir)?,
                             }],
                         )]
                         .into_iter()
@@ -197,7 +207,7 @@ impl Context {
                             uri.clone(),
                             vec![TextEdit {
                                 range,
-                                new_text: data2.to_string(),
+                                new_text: data2.to_manifest_text(&dir, &dir)?,
                             }],
                         )]
                         .into_iter()

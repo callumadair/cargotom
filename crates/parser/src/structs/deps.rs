@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
+use cargo_platform::Platform;
 use taplo::dom::node::TableKind;
 
 use crate::{
-    toml::{DepSource, Dependency, DependencyKind, OptionalKey, Positioned, Target, WithKey},
+    toml::{DepSource, Dependency, DependencyKind, OptionalKey, Positioned, WithKey},
     tree::{str_to_positioned, Value},
     Tree,
 };
@@ -11,7 +12,7 @@ use crate::{
 pub fn get_dependencies(
     value: &Value,
     kind: DependencyKind,
-    targets: Arc<Vec<Positioned<Target>>>,
+    targets: Arc<Vec<Positioned<Platform>>>,
 ) -> Option<Vec<Positioned<Dependency>>> {
     let tree = value.as_tree()?;
     let mut out = vec![];

@@ -5,9 +5,11 @@ edition.workspace = true
 
 [dependencies]
 async-recursion.workspace = true
+cargo.workspace = true
+cargo-platform.workspace = true
+cargo-util.workspace = true
 cargo-util-schemas.workspace = true
 difference = "2.0.0"
-glob.workspace = true
 indexmap = { workspace = true, features = ["serde"] }
 info-provider = { workspace = true }
 regex.workspace = true
@@ -18,11 +20,13 @@ serde_json.workspace = true
 taplo.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 toml.workspace = true
+toml_edit.workspace = true
 tower-lsp.workspace = true
 url.workspace = true
 
 [dev-dependencies]
 rstest = "0.26"
+tempfile = "3.27"
 tokio = { workspace = true, features = ["full"] }
 
 [features]

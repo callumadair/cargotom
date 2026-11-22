@@ -396,17 +396,6 @@ impl Value {
         }
     }
 
-    pub fn as_array(&self) -> Option<&Vec<Value>> {
-        match self {
-            Value::Tree { .. } => None,
-            Value::NoContent => None,
-            Value::Array { value, .. } => Some(value),
-            Value::String { .. } => None,
-            Value::Bool { .. } => None,
-            Value::Unknown(_) => None,
-        }
-    }
-
     pub fn as_bool(&self) -> Option<Positioned<bool>> {
         match self {
             Value::Tree { .. } => None,

@@ -1,13 +1,24 @@
-use std::{fmt::Display, sync::Arc};
+use std::{path::Path, sync::Arc};
 
-use url::Url;
+use cargo::{
+    GlobalContext,
+    workspace::{
+        Features,
+        FeatureValue,
+        editor::dependency::{
+            self as editor_dep, GitSource, PathSource, RegistrySource, WorkspaceSource,
+        },
+    },
+};
+use cargo_platform::Platform;
+use cargo_util::paths::normalize_path;
+use toml_edit::{DocumentMut, Item, Value};
 
 use crate::tree::RangeExclusive;
 
 #[derive(Debug)]
 pub struct Toml {
     pub workspace: bool,
-    pub children: Vec<String>,
     pub dependencies: Vec<Positioned<Dependency>>,
     pub features: Vec<Positioned<Feature>>,
 }
@@ -16,7 +27,6 @@ impl Toml {
     pub fn join(self, other: Self) -> Self {
         Self {
             workspace: self.workspace || other.workspace,
-            children: self.children.into_iter().chain(other.children).collect(),
             dependencies: self
                 .dependencies
                 .into_iter()
@@ -82,7 +92,7 @@ pub struct Dependency {
     pub expanded: bool,
     /// Target platforms for this dependency
     /// if empty = all platforms
-    pub target: Arc<Vec<Positioned<Target>>>,
+    pub target: Arc<Vec<Positioned<Platform>>>,
 }
 
 impl Dependency {
@@ -107,160 +117,85 @@ impl Dependency {
     }
 }
 
-impl Display for DepSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DepSource::Version { value, registry } => match registry {
-                Some(r) => write!(
-                    f,
-                    "version = \"{}\", registry = \"{}\"",
-                    value.value.data, r.value.data
-                ),
-                None => write!(f, "version = \"{}\"", value.value.data),
-            },
+impl Dependency {
+    /// Returns this dependency as `Cargo.toml` text, such as `serde = "1"`.
+    ///
+    /// `from` is the absolute directory of the manifest that holds the
+    /// dependency now, and `to` is the absolute directory of the manifest that
+    /// will hold the text. A path source is rewritten relative to `to`.
+    ///
+    /// An expanded dependency becomes an inline table. A collapsed one uses
+    /// the short form that cargo picks, with a one-key table written as a
+    /// dotted key such as `serde.workspace = true`. A dependency without a
+    /// source becomes its bare name.
+    ///
+    /// Returns `None` when cargo cannot write the dependency, for example when
+    /// `from` or `to` is relative.
+    pub fn to_manifest_text(&self, from: &Path, to: &Path) -> Option<String> {
+        let mut dep = match &self.package {
+            Some(package) => editor_dep::Dependency::new(&package.data).set_rename(self.name()),
+            None => editor_dep::Dependency::new(self.name()),
+        };
+        dep = match &self.source {
+            DepSource::Version { value, registry } => {
+                let dep = dep.set_source(RegistrySource::new(&value.value.data));
+                match registry {
+                    Some(registry) => dep.set_registry(&registry.value.data),
+                    None => dep,
+                }
+            }
             DepSource::Git {
                 url,
                 rev,
                 tag,
                 branch,
-            } => match (rev, tag, branch) {
-                (Some(rev), None, None) => write!(
-                    f,
-                    "git = \"{}\", rev = \"{}\"",
-                    url.clone().map(|v| v.value.data).unwrap_or_default(),
-                    rev.value.data
-                ),
-                (None, Some(tag), None) => write!(
-                    f,
-                    "git = \"{}\", tag = \"{}\"",
-                    url.clone().map(|v| v.value.data).unwrap_or_default(),
-                    tag.value.data
-                ),
-                (None, None, Some(branch)) => write!(
-                    f,
-                    "git = \"{}\", branch = \"{}\"",
-                    url.clone().map(|v| v.value.data).unwrap_or_default(),
-                    branch.value.data
-                ),
-                _ => write!(
-                    f,
-                    "git = \"{}\"",
-                    url.clone().map(|v| v.value.data).unwrap_or_default(),
-                ),
-            },
-            DepSource::Path(p) => write!(f, "path = \"{}\"", p.value.data),
-            DepSource::None => write!(f, "version = \"\""),
-            DepSource::Workspace(_) => write!(f, "workspace = true"),
-        }
-    }
-}
-
-impl Display for Dependency {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.optional.map(|v| v.data).unwrap_or_default() || self.expanded {
-            true => {
-                let mut items = vec![self.source.to_string()];
-                if let Some(v) = self.optional {
-                    if v.data {
-                        items.push("optional = true".to_string());
-                    }
+            } => {
+                let mut git = GitSource::new(url.as_ref().map(|v| v.value.data.as_str()).unwrap_or_default());
+                if let Some(branch) = branch {
+                    git = git.set_branch(&branch.value.data);
                 }
-                if let Some(v) = self
-                    .default_features
-                    .map(|v| format!("default-features = {}", v.data))
-                {
-                    items.push(v);
+                if let Some(tag) = tag {
+                    git = git.set_tag(&tag.value.data);
                 }
-                if !self.features.data.is_empty() {
-                    items.push(format!(
-                        "features = [ {} ]",
-                        self.features
-                            .data
-                            .iter()
-                            .map(|v| format!("\"{}\"", v.data.clone()))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
+                if let Some(rev) = rev {
+                    git = git.set_rev(&rev.value.data);
                 }
-
-                write!(f, "{} = {{ {} }}", self.name.data, items.join(", "))
+                dep.set_source(git)
             }
-            false => match &self.source {
-                DepSource::Version { value, .. } => {
-                    write!(f, "{} = \"{}\"", &self.name.data, &value.value.data)
-                }
-                DepSource::Git { url, .. } => write!(
-                    f,
-                    "{}.git = \"{}\"",
-                    &self.name.data,
-                    url.clone().map(|v| v.value.data).unwrap_or_default(),
-                ),
-                DepSource::Path(path) => {
-                    write!(f, "{}.path = \"{}\"", &self.name.data, &path.value.data,)
-                }
-                DepSource::None => write!(f, "{}", &self.name.data,),
-                DepSource::Workspace(_) => write!(f, "{}.workspace = true", &self.name.data,),
-            },
+            // Cargo diffs the paths without resolving `..`, so normalise first.
+            DepSource::Path(path) => dep.set_source(PathSource::new(normalize_path(
+                &from.join(&path.value.data),
+            ))),
+            DepSource::Workspace(_) => dep.set_source(WorkspaceSource::new()),
+            DepSource::None => return Some(self.name().to_owned()),
+        };
+        if self.optional.is_some_and(|v| v.data) {
+            dep = dep.set_optional(true);
         }
-    }
-}
-
-#[derive(Debug)]
-pub enum Target {
-    Unknown(String),
-}
-
-impl Display for Target {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Target::Unknown(t) => write!(f, "{}", t),
+        if let Some(default_features) = self.default_features {
+            dep = dep.set_default_features(default_features.data);
         }
-    }
-}
+        if !self.features.data.is_empty() {
+            dep = dep.set_features(self.features.data.iter().map(|v| v.data.clone()).collect());
+        }
 
-#[derive(Debug)]
-enum Source {
-    Registry(String),
-    Git {
-        url: String,
-        branch: Option<String>,
-        tag: Option<String>,
-        rev: String,
-    },
-    Other(String),
-}
-
-impl From<&str> for Source {
-    fn from(value: &str) -> Self {
-        if value.starts_with("registry+") {
-            Source::Registry(value.replace("registry+", ""))
-        } else if let Some(url_str) = value.strip_prefix("git+") {
-            match Url::parse(url_str) {
-                Ok(url) => {
-                    let rev = url.fragment().unwrap_or("").to_string();
-
-                    let branch = url
-                        .query_pairs()
-                        .find(|(key, _)| key == "branch")
-                        .map(|(_, value)| value.to_string());
-
-                    let tag = url
-                        .query_pairs()
-                        .find(|(key, _)| key == "tag")
-                        .map(|(_, value)| value.to_string());
-
-                    Source::Git {
-                        url: url_str.to_string(),
-                        branch,
-                        tag,
-                        rev,
-                    }
-                }
-                Err(_) => Source::Other(value.to_string()),
+        let gctx = GlobalContext::default().ok()?;
+        let item = dep.to_toml(&gctx, to, to, &Features::default()).ok()?;
+        let item = match item.into_value().ok()? {
+            Value::String(version) if self.expanded => {
+                let mut table = toml_edit::InlineTable::new();
+                table.insert("version", Value::String(version));
+                Value::InlineTable(table)
             }
-        } else {
-            Source::Other(value.to_string())
-        }
+            Value::InlineTable(mut table) => {
+                table.set_dotted(!self.expanded && table.len() == 1);
+                Value::InlineTable(table)
+            }
+            value => value,
+        };
+        let mut doc = DocumentMut::new();
+        doc.insert(dep.toml_key(), Item::Value(item));
+        Some(doc.to_string().trim_end().to_owned())
     }
 }
 
@@ -479,67 +414,56 @@ pub struct Feature {
     /// feature-name =
     pub name: Positioned<String>,
     /// = [...]
-    pub args: Vec<FeatureArgKind>,
+    pub args: Vec<Positioned<FeatureValue>>,
 }
 
-#[derive(Debug)]
-pub enum FeatureArgKind {
-    /// "feautre-name"
-    CrateFeature(Positioned<String>),
-    /// "crate/feature-name"
-    DependencyFeature {
-        dependency: Positioned<String>,
-        feature: Positioned<String>,
-    },
-    /// "dep:crate"
-    Dependency(Positioned<String>),
-}
+#[cfg(test)]
+mod tests {
+    use std::{path::Path, sync::Arc};
 
-impl From<Positioned<String>> for FeatureArgKind {
-    fn from(value: Positioned<String>) -> Self {
-        if let Some(name) = value.data.strip_prefix("dep:") {
-            Self::Dependency(Positioned {
-                start: value.start,
-                end: value.end,
-                data: name.to_string(),
-            })
-        } else if let Some((crate_name, feature_name)) = value.data.split_once('/') {
-            Self::DependencyFeature {
-                dependency: Positioned {
-                    start: value.start,
-                    end: value.start + crate_name.len() as u32,
-                    data: crate_name.to_string(),
-                },
-                feature: Positioned {
-                    start: value.start + crate_name.len() as u32,
-                    end: value.end,
-                    data: feature_name.to_string(),
-                },
-            }
-        } else {
-            Self::CrateFeature(value)
-        }
+    use rstest::rstest;
+
+    use super::Dependency;
+    use crate::{tree::Tree, tree_to_struct::to_struct};
+
+    fn first_dependency(manifest: &str) -> Dependency {
+        let dom = taplo::parser::parse(manifest).into_dom();
+        let tree = Tree::from(dom.as_table().unwrap());
+        to_struct(&tree, Arc::default()).dependencies.remove(0).data
     }
-}
 
-impl FeatureArgKind {
-    pub fn range(&self) -> RangeExclusive {
-        match self {
-            FeatureArgKind::CrateFeature(v) => RangeExclusive {
-                start: v.start,
-                end: v.end,
-            },
-            FeatureArgKind::DependencyFeature {
-                dependency,
-                feature,
-            } => RangeExclusive {
-                start: dependency.start,
-                end: feature.end,
-            },
-            FeatureArgKind::Dependency(v) => RangeExclusive {
-                start: v.start,
-                end: v.end,
-            },
-        }
+    #[rstest]
+    #[case::bare_name("serde", "serde")]
+    #[case::version_string(r#"serde = "1""#, r#"serde = "1""#)]
+    #[case::expanded_version(r#"serde = { version = "1" }"#, r#"serde = { version = "1" }"#)]
+    #[case::collapsed_workspace("serde.workspace = true", "serde.workspace = true")]
+    #[case::expanded_workspace("serde = { workspace = true }", "serde = { workspace = true }")]
+    #[case::rename(
+        r#"json = { package = "serde_json", version = "1" }"#,
+        r#"json = { version = "1", package = "serde_json" }"#
+    )]
+    #[case::features_and_optional(
+        r#"serde = { version = "1", features = ["derive"], optional = true }"#,
+        r#"serde = { version = "1", features = ["derive"], optional = true }"#
+    )]
+    #[case::optional_false_dropped(
+        r#"serde = { version = "1", optional = false }"#,
+        r#"serde = { version = "1" }"#
+    )]
+    #[case::git_branch(
+        r#"foo = { git = "https://example.com/foo", branch = "main" }"#,
+        r#"foo = { git = "https://example.com/foo", branch = "main" }"#
+    )]
+    fn to_manifest_text(#[case] entry: &str, #[case] expected: &str) {
+        let dep = first_dependency(&format!("[dependencies]\n{entry}\n"));
+        let dir = Path::new("/workspace/member");
+        assert_eq!(dep.to_manifest_text(dir, dir).as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn to_manifest_text_rewrites_path_relative_to_target() {
+        let dep = first_dependency("[dependencies]\nfoo = { path = \"../foo\" }\n");
+        let text = dep.to_manifest_text(Path::new("/workspace/member"), Path::new("/workspace"));
+        assert_eq!(text.as_deref(), Some(r#"foo = { path = "foo" }"#));
     }
 }

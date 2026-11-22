@@ -9,16 +9,11 @@ pub mod tree;
 mod tree_to_struct;
 
 use std::{
-    collections::{HashMap, HashSet},
-    fs::read_to_string,
-    panic::catch_unwind,
-    path::PathBuf,
-    sync::Arc,
+    collections::HashMap, fs::read_to_string, panic::catch_unwind, path::PathBuf, sync::Arc,
 };
 
-use async_recursion::async_recursion;
+use cargo::GlobalContext;
 use config::Config;
-use glob::Pattern;
 use info_provider::InfoProvider;
 use lock::LoggedRwLock;
 use ropey::Rope;
@@ -41,27 +36,23 @@ pub struct Db {
     trees: HashMap<Uri, Tree>,
     tomls: HashMap<Uri, Toml>,
     info: Arc<InfoProvider>,
-    workspaces: Workspaces,
+    /// Workspace root manifest of each member manifest.
+    workspaces: HashMap<Uri, Uri>,
     locks: HashMap<Uri, TomlLockfile>,
     pub warnings: Arc<RwLock<HashMap<Uri, Vec<Warning>>>>,
     pub config: Config,
 }
 
-#[derive(Default)]
-pub struct Workspaces(HashMap<Pattern, Uri>);
-
-impl Workspaces {
-    pub fn get(&self, uri: &Uri) -> Option<&Uri> {
-        self.0
-            .iter()
-            .find(|(p, _)| p.matches(&uri.to_string()))
-            .map(|v| v.1)
-    }
-
-    pub fn insert(&mut self, key: &Uri, value: Uri) -> Option<Url> {
-        let pattern = Pattern::new(&key.to_string()).ok()?;
-        self.0.insert(pattern, value)
-    }
+/// Returns the root manifest of the workspace that lists `manifest` as a
+/// member, read from disk by cargo.
+///
+/// Returns `None` for a workspace root, for a package outside any workspace,
+/// and when cargo cannot read a manifest on the way up.
+fn find_workspace_root(manifest: &Uri) -> Option<Uri> {
+    let path = manifest.to_file_path().ok()?;
+    let gctx = GlobalContext::default().ok()?;
+    let root = cargo::workspace::find_workspace_root(&path, &gctx).ok()??;
+    Url::from_file_path(root).ok()
 }
 
 #[derive(Debug, Clone)]
@@ -250,55 +241,17 @@ impl Db {
         Some(found)
     }
 
-    fn cycle_key(uri: &Uri) -> String {
-        uri.to_file_path()
-            .ok()
-            .and_then(|p| std::fs::canonicalize(p).ok())
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| uri.to_string())
-    }
-
     pub async fn reload(&mut self, uri: Uri) -> Option<()> {
-        let mut seen = HashSet::new();
-        seen.insert(Self::cycle_key(&uri));
-        self.reload_seen(uri, &mut seen).await
-    }
-
-    #[async_recursion]
-    async fn reload_seen(&mut self, uri: Uri, seen: &mut HashSet<String>) -> Option<()> {
-        let content = self.files.get(&uri);
-        let mut uri_ = Some(uri.clone());
-        if let Some(content) = content {
+        if let Some(content) = self.files.get(&uri) {
             self.add_content(uri.clone(), &content.to_string());
             if let Some(tree) = self.trees.get(&uri) {
-                let empty = Arc::new(Vec::new());
-                let str = to_struct(tree, empty);
-                let children = match str.workspace {
-                    true => str.children.clone(),
-                    false => Vec::new(),
-                };
-                self.tomls.insert(uri.clone(), str);
-                for ur in &children {
-                    let file_path = uri.to_file_path().ok()?;
-                    let folder_path = file_path.parent();
-                    let new_path = folder_path.map(|v| v.join(format!("{}/Cargo.toml", ur)));
-                    let ur = Url::from_file_path(
-                        new_path.unwrap_or(PathBuf::from(format!("{ur}/Cargo.toml"))),
-                    )
-                    .ok()?;
-                    // Prevents infinite recursion form alias, symlink, or "."
-                    if !seen.insert(Self::cycle_key(&ur)) {
-                        continue;
-                    }
-                    let v = self.workspaces.insert(&ur, uri.clone());
-                    self.try_init_seen(&ur, seen).await;
-                    if v.is_some() {
-                        uri_ = None
-                    }
-                }
+                self.tomls.insert(uri.clone(), to_struct(tree, Arc::default()));
             }
         }
-        self.analyze(uri_).await;
+        // Members read their workspace dependencies from the root, so a root
+        // change must analyse every open file.
+        let is_root = self.workspaces.values().any(|root| *root == uri);
+        self.analyze((!is_root).then_some(uri)).await;
         Some(())
     }
 
@@ -320,13 +273,21 @@ impl Db {
         Some(())
     }
 
+    /// Loads the manifest at `uri` and its `Cargo.lock`, then analyses it.
+    ///
+    /// When `uri` is a workspace member, the workspace root manifest is
+    /// loaded first so that `workspace = true` dependencies resolve.
     pub async fn try_init(&mut self, uri: &Uri) -> Option<()> {
-        let mut seen = HashSet::new();
-        seen.insert(Self::cycle_key(uri));
-        self.try_init_seen(uri, &mut seen).await
+        if let Some(root) = find_workspace_root(uri) {
+            self.workspaces.insert(uri.clone(), root.clone());
+            if !self.tomls.contains_key(&root) {
+                self.load(&root).await;
+            }
+        }
+        self.load(uri).await
     }
 
-    async fn try_init_seen(&mut self, uri: &Uri, seen: &mut HashSet<String>) -> Option<()> {
+    async fn load(&mut self, uri: &Uri) -> Option<()> {
         if !self.files.contains_key(uri) {
             self.add_file(uri);
         }
@@ -343,7 +304,7 @@ impl Db {
             self.update_lock(file).await;
         }
 
-        self.reload_seen(uri.clone(), seen).await;
+        self.reload(uri.clone()).await;
 
         Some(())
     }

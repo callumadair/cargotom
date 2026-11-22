@@ -1,5 +1,7 @@
+use cargo::workspace::FeatureValue;
+
 use crate::{
-    toml::{Feature, FeatureArgKind, Positioned},
+    toml::{Feature, Positioned},
     tree::Value,
 };
 
@@ -15,11 +17,11 @@ pub fn get_features(value: &Value) -> Option<Vec<Positioned<Feature>>> {
                 let args = value
                     .iter()
                     .filter_map(|v| v.as_str())
-                    .map(|v| v.into())
+                    .map(|v| Positioned::new(v.start, v.end, FeatureValue::new(v.data.as_str().into())))
                     .collect::<Vec<_>>();
                 let max = args
                     .iter()
-                    .map(|v: &FeatureArgKind| v.range().end)
+                    .map(|v| v.end)
                     .max()
                     .unwrap_or(tree_value.key.closest_range(tree_value.pos.end).end);
                 out.push(Positioned {
