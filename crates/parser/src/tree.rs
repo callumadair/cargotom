@@ -1,5 +1,3 @@
-use std::fmt::Display;
-
 use taplo::{
     dom::{
         node::{DomNode, Table, TableKind},
@@ -17,23 +15,13 @@ pub(crate) struct Tree {
     pub pos: RangeExclusive,
 }
 
-#[derive(Debug)]
+#[derive(Debug, derive_more::Display)]
 pub enum Type {
     TreeKey(String),
     String(String),
     Bool(bool),
+    #[display("unknown")]
     Unknown,
-}
-
-impl Display for Type {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Type::TreeKey(key) => write!(f, "{}", key),
-            Type::String(value) => write!(f, "{}", value),
-            Type::Bool(value) => write!(f, "{}", value),
-            Type::Unknown => write!(f, "unknown"),
-        }
-    }
 }
 
 #[derive(Debug)]

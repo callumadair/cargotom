@@ -5,19 +5,13 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-byteorder.workspace = true
 cargo.workspace = true
-fst.workspace = true
+crates-io = "0.41.3"
 html2md.workspace = true
-openssl = { workspace = true, features = ["vendored"] }
-reqwest = { workspace = true, features = ["json"] }
-semver.workspace = true
+http = "1.5"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-tar = "0.4"
 tokio = { workspace = true, features = ["rt", "sync"] }
-urlencoding.workspace = true
-zstd = "0.14.4"
 
 [dev-dependencies]
 cargo-util-terminal = "0.1.3"

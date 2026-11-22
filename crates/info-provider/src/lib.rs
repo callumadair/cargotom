@@ -1,130 +1,233 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+//! Crate metadata for the language server.
+//!
+//! Versions and features come from the registry index through cargo. Search
+//! results, readmes and repository links come from crates.io. Every lookup
+//! runs on a blocking thread and reads the cargo config of the user.
 
-use api::{CacheItem, CacheItemOut, Crate};
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
+};
+
+use cargo::{GlobalContext, util::CargoResult};
 pub use cargo::workspace::Summary;
-use fst::{Set, SetBuilder};
-use local::OfflineCrate;
-use tokio::sync::RwLock;
+pub use crates_io::Crate;
+use tokio::sync::{Mutex, OnceCell};
 
 pub mod api;
-mod downloader;
-mod local;
+
+const CRATES_IO_API: &str = "https://crates.io";
+const CRATES_IO_READMES: &str = "https://static.crates.io/readmes";
+
+/// The state of one cached lookup.
+pub enum CacheItemOut<V> {
+    NotStarted,
+    Pending,
+    Error(String),
+    Ready(V),
+}
+
+type Entry<V> = Arc<OnceCell<Result<V, String>>>;
+
+/// Runs one blocking fetch per key and keeps the result, an error included.
+/// Concurrent callers for one key share a single fetch.
+#[derive(Default)]
+struct Cache<K, V>(Mutex<HashMap<K, Entry<V>>>);
+
+impl<K: Eq + Hash, V: Clone + Send + 'static> Cache<K, V> {
+    async fn peek(&self, key: &K) -> CacheItemOut<V> {
+        let state = self.0.lock().await.get(key).map(|cell| cell.get().cloned());
+        match state {
+            None => CacheItemOut::NotStarted,
+            Some(None) => CacheItemOut::Pending,
+            Some(Some(Ok(value))) => CacheItemOut::Ready(value),
+            Some(Some(Err(e))) => CacheItemOut::Error(e),
+        }
+    }
+
+    async fn get(
+        &self,
+        key: K,
+        fetch: impl FnOnce() -> CargoResult<V> + Send + 'static,
+    ) -> Result<V, String> {
+        let cell = self.0.lock().await.entry(key).or_default().clone();
+        cell.get_or_init(|| async move {
+            match tokio::task::spawn_blocking(fetch).await {
+                Ok(result) => result.map_err(|e| format!("{e:#}")),
+                Err(e) => Err(e.to_string()),
+            }
+        })
+        .await
+        .clone()
+    }
+
+    /// Like [`Self::get`], but drops an error so that the next call fetches
+    /// again.
+    async fn get_or_retry(
+        &self,
+        key: K,
+        fetch: impl FnOnce() -> CargoResult<V> + Send + 'static,
+    ) -> Result<V, String>
+    where
+        K: Clone,
+    {
+        let result = self.get(key.clone(), fetch).await;
+        if result.is_err() {
+            self.0.lock().await.remove(&key);
+        }
+        result
+    }
+
+    async fn clear(&self) {
+        self.0.lock().await.clear();
+    }
+}
+
 pub struct InfoProvider {
-    client: Arc<reqwest::Client>,
-    readme_cache: Arc<RwLock<HashMap<(String, String), CacheItem<String>>>>,
+    per_page: AtomicU32,
+    readmes: Cache<(String, String), String>,
     /// Keyed by registry name, where `None` is crates.io, and crate name.
-    info_cache: Arc<RwLock<HashMap<(Option<String>, String), CacheItem<Summary>>>>,
-    search_cache: Arc<RwLock<HashMap<String, CacheItem<Crate>>>>,
-    per_page: RwLock<usize>,
-    offline: Arc<RwLock<bool>>,
-    data: Arc<
-        RwLock<(
-            Set<Vec<u8>>,
-            HashMap<String, Vec<Arc<OfflineCrate>>>,
-            Vec<Arc<OfflineCrate>>,
-        )>,
-    >,
-    root: PathBuf,
+    summaries: Cache<(Option<String>, String), Vec<Summary>>,
+    searches: Cache<String, Arc<[Crate]>>,
 }
 
 impl InfoProvider {
-    pub async fn new(per_page: usize, offline: bool, data_path: PathBuf) -> Self {
-        let off = Arc::new(RwLock::new(offline));
-        let mut builder = SetBuilder::memory();
-        builder.insert("placeholder").unwrap();
-        let off_data = Arc::new(RwLock::new((
-            Set::new(builder.into_inner().unwrap()).unwrap(),
-            HashMap::new(),
-            Vec::new(),
-        )));
-        if offline {
-            local::init(off.clone(), off_data.clone(), data_path.clone()).await;
-        }
-
+    /// `per_page` is the most results that one search returns.
+    pub fn new(per_page: u32) -> Self {
         Self {
-            root: data_path,
-            data: off_data,
-            offline: off,
-            client: Arc::new(reqwest::Client::new()),
-            info_cache: Default::default(),
-            search_cache: Default::default(),
-            readme_cache: Default::default(),
-            per_page: RwLock::new(per_page),
+            per_page: AtomicU32::new(per_page),
+            readmes: Cache::default(),
+            summaries: Cache::default(),
+            searches: Cache::default(),
         }
     }
 
-    pub async fn set_per_page(&self, per_page: usize) {
-        *self.per_page.write().await = per_page;
-        self.search_cache.write().await.drain();
+    /// Sets the search result limit and drops the cached searches.
+    pub async fn set_per_page(&self, per_page: u32) {
+        self.per_page.store(per_page, Ordering::Relaxed);
+        self.searches.clear().await;
     }
 
-    pub async fn set_offline(&self, offline: bool) {
-        let old_offline = *self.offline.read().await;
-        match (old_offline, offline) {
-            (true, false) => {
-                *self.offline.write().await = false;
-                let mut builder = SetBuilder::memory();
-                builder.insert("placeholder").unwrap();
-                let mut lock = self.data.write().await;
-                lock.1 = HashMap::new();
-                lock.2 = Vec::new();
-                lock.0 = Set::new(builder.into_inner().unwrap()).unwrap()
-            }
-            (false, true) => {
-                *self.offline.write().await = true;
-                local::init(self.offline.clone(), self.data.clone(), self.root.clone()).await;
-            }
-            _ => {}
-        }
+    /// Returns the cached result of [`Self::get_info`] without starting it.
+    pub async fn get_info_cache(&self, registry: Option<&str>, name: &str) -> CacheItemOut<Vec<Summary>> {
+        self.summaries
+            .peek(&(registry.map(ToOwned::to_owned), name.to_owned()))
+            .await
     }
 
-    pub async fn get_info_cache(&self, registry: Option<&str>, name: &str) -> CacheItemOut<Summary> {
-        self.get_info_cache_api(registry, name).await
-    }
-
+    /// Returns every non-yanked version of `name`, as [`api::query_index`]
+    /// describes. The first call for a crate queries the registry, and later
+    /// calls return the same result.
     pub async fn get_info(&self, registry: Option<&str>, name: &str) -> Result<Vec<Summary>, String> {
-        self.get_info_api(registry, name).await
+        let key = (registry.map(ToOwned::to_owned), name.to_owned());
+        let (registry, name) = key.clone();
+        self.summaries
+            .get(key, move || {
+                api::query_index(&GlobalContext::default()?, registry.as_deref(), &name)
+            })
+            .await
     }
 
-    pub async fn search(&self, name: &str) -> Result<Vec<Crate>, anyhow::Error> {
-        let offline = *self.offline.read().await;
-        if offline {
-            let len = self.data.read().await.1.len();
-            if len != 0 {
-                return Ok(self.search_local(name).await);
-            }
-        }
-        self.search_api(name).await
+    /// Searches crates.io for `name` and returns at most the configured number
+    /// of results, in relevance order. A failed search is retried on the next
+    /// call.
+    pub async fn search(&self, name: &str) -> Result<Arc<[Crate]>, String> {
+        let limit = self.per_page.load(Ordering::Relaxed);
+        let query = name.to_owned();
+        self.searches
+            .get_or_retry(name.to_owned(), move || {
+                api::search(&GlobalContext::default()?, CRATES_IO_API, &query, limit).map(Arc::from)
+            })
+            .await
     }
 
-    pub async fn get_crate_repository(&self, crate_name: &str) -> Option<String> {
-        self.get_crate_repository_api(crate_name).await
+    /// Returns the crates.io readme of one version as Markdown, or `None`
+    /// when the fetch fails. A failed fetch is retried on the next call.
+    pub async fn get_readme(&self, name: &str, version: &str) -> Option<String> {
+        let key = (name.to_owned(), version.to_owned());
+        let (name, version) = key.clone();
+        self.readmes
+            .get_or_retry(key, move || {
+                api::readme(&GlobalContext::default()?, CRATES_IO_READMES, &name, &version)
+            })
+            .await
+            .ok()
+    }
+
+    /// Returns the repository link that crates.io lists for `name`.
+    pub async fn get_crate_repository(&self, name: &str) -> Option<String> {
+        let name = name.to_owned();
+        tokio::task::spawn_blocking(move || {
+            api::repository(&GlobalContext::default()?, CRATES_IO_API, &name)
+        })
+        .await
+        .ok()?
+        .ok()?
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, time::Duration};
+    use std::sync::atomic::AtomicUsize;
 
-    use tokio::time;
+    use anyhow::anyhow;
+    use rstest::rstest;
 
-    use crate::InfoProvider;
+    use super::*;
 
     #[tokio::test]
-    async fn offline() {
-        let provider = InfoProvider::new(10, true, PathBuf::from("data")).await;
-        println!(
-            "{:#?}",
-            provider
-                .data
-                .read()
-                .await
-                .1
-                .values()
-                .flatten()
-                .max_by(|a, b| a.order.cmp(&b.order))
+    async fn cache_runs_one_fetch_per_key() {
+        let cache = Cache::<&str, u32>::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetch = |calls: Arc<AtomicUsize>| {
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(7)
+            }
+        };
+        assert!(matches!(cache.peek(&"a").await, CacheItemOut::NotStarted));
+        let (first, second) = tokio::join!(
+            cache.get("a", fetch(calls.clone())),
+            cache.get("a", fetch(calls.clone())),
         );
-        time::sleep(Duration::from_secs(20)).await;
-        println!("{}", provider.data.read().await.1.len());
+        assert_eq!((first, second), (Ok(7), Ok(7)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(cache.peek(&"a").await, CacheItemOut::Ready(7)));
+    }
+
+    #[derive(Clone, Copy)]
+    enum Call {
+        Get,
+        GetThenClear,
+        GetOrRetry,
+    }
+
+    #[rstest]
+    #[case::get_keeps_error(Call::Get, "Error")]
+    #[case::clear_forgets(Call::GetThenClear, "NotStarted")]
+    #[case::retry_drops_error(Call::GetOrRetry, "NotStarted")]
+    #[tokio::test]
+    async fn cache_error_state(#[case] call: Call, #[case] expected: &str) {
+        let cache = Cache::<&str, u32>::default();
+        let fetch = || Err(anyhow!("offline"));
+        let result = match call {
+            Call::Get | Call::GetThenClear => cache.get("a", fetch).await,
+            Call::GetOrRetry => cache.get_or_retry("a", fetch).await,
+        };
+        assert_eq!(result, Err("offline".to_owned()));
+        if let Call::GetThenClear = call {
+            cache.clear().await;
+        }
+        let state = match cache.peek(&"a").await {
+            CacheItemOut::NotStarted => "NotStarted",
+            CacheItemOut::Pending => "Pending",
+            CacheItemOut::Error(_) => "Error",
+            CacheItemOut::Ready(_) => "Ready",
+        };
+        assert_eq!(state, expected);
     }
 }

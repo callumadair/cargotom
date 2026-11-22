@@ -62,13 +62,14 @@ impl<T> Positioned<T> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A dependency table. `FromStr` parses the table name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::EnumString)]
 pub enum DependencyKind {
-    /// dependencies
+    #[strum(serialize = "dependencies")]
     Normal,
-    /// dev-dependencies
+    #[strum(serialize = "dev-dependencies")]
     Development,
-    /// build-dependencies
+    #[strum(serialize = "build-dependencies")]
     Build,
 }
 

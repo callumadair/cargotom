@@ -9,7 +9,7 @@ cargo.workspace = true
 cargo-platform.workspace = true
 cargo-util.workspace = true
 cargo-util-schemas.workspace = true
-difference = "2.0.0"
+derive_more = { version = "2.1.1", features = ["display"] }
 indexmap = { workspace = true, features = ["serde"] }
 info-provider = { workspace = true }
 regex.workspace = true
@@ -17,6 +17,7 @@ ropey.workspace = true
 semver.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+strum = { version = "0.28.0", features = ["derive"] }
 taplo.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 toml.workspace = true
@@ -28,7 +29,3 @@ url.workspace = true
 rstest = "0.26"
 tempfile = "3.27"
 tokio = { workspace = true, features = ["full"] }
-
-[features]
-default = []
-log-all = []

@@ -3,14 +3,12 @@ use std::{
         HashMap,
         HashSet,
     },
-    path::PathBuf,
     sync::Arc,
 };
 
 use info_provider::InfoProvider;
 use parser::{
     config::Config,
-    lock::LoggedRwLock,
     toml::{
         DepSource,
         OptionalKey,
@@ -21,6 +19,7 @@ use parser::{
     Indent,
 };
 use cargo_util_schemas::core::PartialVersion;
+use tokio::sync::RwLock;
 use tower_lsp::{
     async_trait,
     jsonrpc::Result,
@@ -79,7 +78,7 @@ use tower_lsp::{
 pub struct Context
 {
     pub client: Client,
-    db:         Arc<LoggedRwLock<Db>>,
+    db:         Arc<RwLock<Db>>,
     pub info:   Arc<InfoProvider>,
 }
 
@@ -124,7 +123,7 @@ impl LanguageServer for Context
         params: DidChangeWorkspaceFoldersParams,
     )
     {
-        let mut lock = self.db.write("did_change_workspace_folders").await;
+        let mut lock = self.db.write().await;
         for remove in params.event.removed
         {
             lock.remove_workspace(&remove.uri);
@@ -147,10 +146,9 @@ impl LanguageServer for Context
     {
         let c = self.db.clone();
         let config = load_config(&params);
-        let mut lock = self.db.write("initialize").await;
+        let mut lock = self.db.write().await;
         lock.config = config;
         self.info.set_per_page(lock.config.per_page).await;
-        self.info.set_offline(lock.config.offline).await;
 
         lock.sel = Some(c);
         for v in params.workspace_folders.unwrap_or_default()
@@ -258,7 +256,7 @@ impl LanguageServer for Context
         let uri = params.text_document.uri.clone();
         if uri.to_string().ends_with("/Cargo.lock")
         {
-            let mut lock = self.db.write("change").await;
+            let mut lock = self.db.write().await;
 
             lock.update_lock(uri).await;
             return;
@@ -268,7 +266,7 @@ impl LanguageServer for Context
             return;
         }
         {
-            let mut lock = self.db.write("change").await;
+            let mut lock = self.db.write().await;
             for change in params.content_changes
             {
                 let range = change.range.map(|v| {
@@ -293,7 +291,7 @@ impl LanguageServer for Context
         let uri = params.text_document.uri;
         if uri.to_string().ends_with("/Cargo.lock")
         {
-            let mut lock = self.db.write("open").await;
+            let mut lock = self.db.write().await;
             lock.update_lock(uri).await;
             return;
         }
@@ -302,7 +300,7 @@ impl LanguageServer for Context
             return;
         }
         {
-            let mut lock = self.db.write("open").await;
+            let mut lock = self.db.write().await;
             lock.update(&uri, None, &params.text_document.text);
             lock.reload(uri).await;
         }
@@ -337,7 +335,7 @@ impl LanguageServer for Context
         {
             actions.extend(self.first_line_actions().await);
         }
-        let lock = self.db.read("code_action").await;
+        let lock = self.db.read().await;
         if let Some(dep) = lock.get_dependency(
             &uri,
             (
@@ -394,47 +392,25 @@ impl LanguageServer for Context
                         actions_last.push(CodeActionOrCommand::CodeAction(action));
                     };
 
-                if lock.config.offline
-                {
-                    let info = self.info.get_local(crate_name).await;
-                    if let Some(info) = info
-                    {
-                        if let Some(repo) = &info.repository
-                        {
-                            open_page(&mut actions_last, "Repository", repo);
-                        }
-                        if let Some(documentation) = &info.documentation
-                        {
-                            open_page(&mut actions_last, "Documentation", documentation);
-                        }
-                        if let Some(homepage) = &info.homepage
-                        {
-                            open_page(&mut actions_last, "Homepage", homepage);
-                        }
-                    }
-                }
-                else
-                {
-                    open_page(
-                        &mut actions_last,
-                        "Documentation",
-                        &format!("https://docs.rs/{crate_name}/{version}/"),
-                    );
-                    let action = CodeAction {
-                        title: "Open Source".to_string(),
-                        kind: Some(CodeActionKind::EMPTY),
-                        command: Some(Command {
-                            title:     "Open Source".to_string(),
-                            command:   "open-src".to_string(),
-                            arguments: Some(vec![
-                                serde_json::Value::String(crate_name.clone()),
-                                serde_json::Value::String(version.clone()),
-                            ]),
-                        }),
-                        ..CodeAction::default()
-                    };
-                    actions_last.push(CodeActionOrCommand::CodeAction(action));
-                }
+                open_page(
+                    &mut actions_last,
+                    "Documentation",
+                    &format!("https://docs.rs/{crate_name}/{version}/"),
+                );
+                let action = CodeAction {
+                    title: "Open Source".to_string(),
+                    kind: Some(CodeActionKind::EMPTY),
+                    command: Some(Command {
+                        title:     "Open Source".to_string(),
+                        command:   "open-src".to_string(),
+                        arguments: Some(vec![
+                            serde_json::Value::String(crate_name.clone()),
+                            serde_json::Value::String(version.clone()),
+                        ]),
+                    }),
+                    ..CodeAction::default()
+                };
+                actions_last.push(CodeActionOrCommand::CodeAction(action));
                 open_page(
                     &mut actions_last,
                     "crates.io",
@@ -604,7 +580,7 @@ impl LanguageServer for Context
         params: DocumentFormattingParams,
     ) -> Result<Option<Vec<TextEdit>>>
     {
-        let temp = self.db.read("formatting").await;
+        let temp = self.db.read().await;
         let data = temp
             .format(
                 &params.text_document.uri,
@@ -642,7 +618,7 @@ impl LanguageServer for Context
 
         let v = self
             .db
-            .read("inlay_hint")
+            .read()
             .await
             .hints(&params.text_document.uri)
             .await
@@ -675,7 +651,7 @@ impl LanguageServer for Context
             return Ok(None);
         }
 
-        let lock = self.db.read("hover").await;
+        let lock = self.db.read().await;
         if let Some(h) = self
             .hover_dep(&uri, params.text_document_position_params.position, &lock)
             .await
@@ -732,7 +708,7 @@ impl LanguageServer for Context
             return Ok(None);
         }
 
-        let lock = self.db.read("completion").await;
+        let lock = self.db.read().await;
         let toml = match lock.get_toml(&uri)
         {
             Some(v) => v,
@@ -774,16 +750,13 @@ impl LanguageServer for Context
                 let out = Ok(Some(CompletionResponse::List(CompletionList {
                     is_incomplete: true,
                     items:         info
-                        .into_iter()
+                        .iter()
                         .filter(|v| !deps.contains(&v.name.as_str()))
                         .enumerate()
                         .map(|(i, v)| {
                             CompletionItem {
-                                label: format!("{i}. {}", v.name.clone()),
-                                // kind: Some(CompletionItemKind::MODULE),
-                                detail: v.description,
-                                // preselect:
-                                // Some(v.exact_match),
+                                label: format!("{i}. {}", v.name),
+                                detail: v.description.clone(),
                                 sort_text: Some(format!("{:06}", i)),
                                 text_edit: Some(CompletionTextEdit::Edit(TextEdit {
                                     range:    Range {
@@ -798,7 +771,7 @@ impl LanguageServer for Context
                                     },
                                     new_text: {
                                         let mut dep = dep.data.clone();
-                                        dep.set_name(v.name);
+                                        dep.set_name(v.name.clone());
                                         if let DepSource::None = dep.source
                                         {
                                             match workspace.is_some()
@@ -810,20 +783,8 @@ impl LanguageServer for Context
                                                 }
                                                 false =>
                                                 {
-                                                    let ver = match lock.config.stable_version
-                                                    {
-                                                        true =>
-                                                        {
-                                                            v.max_stable_version.or(v.max_version)
-                                                        }
-                                                        false =>
-                                                        {
-                                                            v.max_version.or(v.max_stable_version)
-                                                        }
-                                                    }
-                                                    .unwrap_or_default();
-                                                    let ver =
-                                                        dependency_requirement(&ver).to_owned();
+                                                    let ver = dependency_requirement(&v.max_version)
+                                                        .to_owned();
                                                     dep.source = DepSource::Version {
                                                         value:    OptionalKey::no_key(
                                                             Positioned::new(0, 0, ver),
@@ -1026,11 +987,11 @@ impl LanguageServer for Context
     }
 }
 
-pub async fn main(path: PathBuf)
+pub async fn main()
 {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    let info = Arc::new(InfoProvider::new(50, false, path).await);
+    let info = Arc::new(InfoProvider::new(50));
     let (client, server) = LspService::build(|client| {
         Context {
             client: client.clone(),

@@ -57,13 +57,13 @@ async fn member_opened_first_finds_glob_root() {
 
     let member_uri = Url::from_file_path(member.join("Cargo.toml")).unwrap();
     let root_uri = Url::from_file_path(dir.path().join("Cargo.toml")).unwrap();
-    let info = Arc::new(InfoProvider::new(50, false, dir.path().to_path_buf()).await);
+    let info = Arc::new(InfoProvider::new(50));
     let db = Db::new(make_client(), info);
-    db.write("test").await.sel = Some(db.clone());
+    db.write().await.sel = Some(db.clone());
 
-    db.write("test").await.try_init(&member_uri).await;
+    db.write().await.try_init(&member_uri).await;
 
-    let lock = db.read("test").await;
+    let lock = db.read().await;
     assert_eq!(lock.get_workspace(&member_uri), Some(&root_uri));
     let root = lock.get_toml(&root_uri).unwrap();
     assert!(root.workspace);

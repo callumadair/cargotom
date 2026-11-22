@@ -2,8 +2,8 @@ use std::usize;
 
 use cargo_util_schemas::core::{PartialVersion, SourceKind};
 use info_provider::api::feature_lines;
+use tokio::sync::RwLockReadGuard;
 use parser::{
-    lock::LoggedReadGuard,
     toml::{Dependency, Positioned},
     tree::RangeExclusive,
     Db,
@@ -21,7 +21,7 @@ impl Context {
         dep: &Positioned<Dependency>,
         offset: usize,
         uri: &Url,
-        lock: &LoggedReadGuard<'_, Db>,
+        lock: &RwLockReadGuard<'_, Db>,
     ) -> Option<Hover> {
         let range = dep.data.source.range()?;
         if range.contains(offset) {
@@ -67,7 +67,7 @@ impl Context {
         dep: &Positioned<Dependency>,
         offset: usize,
         uri: &Url,
-        lock: &LoggedReadGuard<'_, Db>,
+        lock: &RwLockReadGuard<'_, Db>,
     ) -> Option<Hover> {
         let range = dep.data.crate_name_range();
         if range.contains(offset) {
@@ -82,7 +82,7 @@ impl Context {
             }
             let content = self
                 .info
-                .get_readme_api(&dep.data.crate_name(), &lock.version.to_string())
+                .get_readme(&dep.data.crate_name(), &lock.version.to_string())
                 .await?;
 
             return Some(Hover {
@@ -110,7 +110,7 @@ impl Context {
         dep: &Positioned<Dependency>,
         offset: usize,
         uri: &Url,
-        lock: &LoggedReadGuard<'_, Db>,
+        lock: &RwLockReadGuard<'_, Db>,
     ) -> Option<Hover> {
         if dep.end == 0 {
             return None;
@@ -176,7 +176,7 @@ impl Context {
         &self,
         uri: &Url,
         position: Position,
-        lock: &LoggedReadGuard<'_, Db>,
+        lock: &RwLockReadGuard<'_, Db>,
     ) -> Option<Hover> {
         let pos = (position.line as usize, position.character as usize);
         let dep = lock.get_dependency(

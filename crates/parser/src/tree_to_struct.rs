@@ -16,24 +16,6 @@ pub fn to_struct(tree: &Tree, target: Arc<Vec<Positioned<Platform>>>) -> Toml {
     let mut workspace_deps = None;
     for value in tree.nodes.iter() {
         match value.key.value.as_str() {
-            "profile" | "badges" | "lints" | "patch" | "replace" | "bench" | "test" | "example"
-            | "package" | "lib" | "bin" => { /* ignore */ }
-            "dependencies" => {
-                let deps = get_dependencies(&value.value, DependencyKind::Normal, target.clone())
-                    .unwrap_or_default();
-                dep.extend(deps);
-            }
-            "dev-dependencies" => {
-                let deps =
-                    get_dependencies(&value.value, DependencyKind::Development, target.clone())
-                        .unwrap_or_default();
-                dep.extend(deps);
-            }
-            "build-dependencies" => {
-                let deps = get_dependencies(&value.value, DependencyKind::Build, target.clone())
-                    .unwrap_or_default();
-                dep.extend(deps);
-            }
             "target" => {
                 for tree in value.value.as_tree().unwrap().nodes.iter() {
                     let key = &tree.key.value;
@@ -54,7 +36,11 @@ pub fn to_struct(tree: &Tree, target: Arc<Vec<Positioned<Platform>>>) -> Toml {
                     .get_or_insert_with(Vec::new)
                     .extend(workspace_dependencies(&value.value, target.clone()).unwrap_or_default());
             }
-            _ => {}
+            key => {
+                if let Ok(kind) = key.parse::<DependencyKind>() {
+                    dep.extend(get_dependencies(&value.value, kind, target.clone()).unwrap_or_default());
+                }
+            }
         }
     }
     let workspace = workspace_deps.is_some();

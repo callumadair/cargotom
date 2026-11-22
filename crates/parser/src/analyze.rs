@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use async_recursion::async_recursion;
-use info_provider::api::CacheItemOut;
+use info_provider::CacheItemOut;
 use cargo_util_schemas::core::PartialVersion;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
@@ -120,7 +120,7 @@ impl Db {
                                 if v {
                                     let _ = info.get_info(reg.as_deref(), &name).await;
                                 }
-                                let lock = sel.read("analyze spawn").await;
+                                let lock = sel.read().await;
                                 lock.analyze_single(&uri).await;
                             });
                         }

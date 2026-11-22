@@ -47,11 +47,11 @@ async fn workspace_member_dot_does_not_recurse_forever() {
 
     let uri = Url::from_file_path(dir.join("Cargo.toml")).unwrap();
     // offline=true would make it slow, not need here
-    let info = Arc::new(InfoProvider::new(50, false, dir.clone()).await);
+    let info = Arc::new(InfoProvider::new(50));
     let db = Db::new(make_client(), info);
 
     let result = tokio::time::timeout(Duration::from_secs(10), async {
-        db.write("test").await.try_init(&uri).await;
+        db.write().await.try_init(&uri).await;
     })
     .await;
 
@@ -79,11 +79,11 @@ async fn workspace_member_aliasing_root_via_different_path_does_not_recurse_fore
 
     let uri = Url::from_file_path(dir.join("Cargo.toml")).unwrap();
     // offline=true would make it slow, not need here
-    let info = Arc::new(InfoProvider::new(50, false, dir.clone()).await);
+    let info = Arc::new(InfoProvider::new(50));
     let db = Db::new(make_client(), info);
 
     let result = tokio::time::timeout(Duration::from_secs(10), async {
-        db.write("test").await.try_init(&uri).await;
+        db.write().await.try_init(&uri).await;
     })
     .await;
 
@@ -112,11 +112,11 @@ async fn workspace_member_symlink_loop_does_not_recurse_forever() {
 
     let uri = Url::from_file_path(dir.join("Cargo.toml")).unwrap();
     // offline=true would make it slow, not need here
-    let info = Arc::new(InfoProvider::new(50, false, dir.clone()).await);
+    let info = Arc::new(InfoProvider::new(50));
     let db = Db::new(make_client(), info);
 
     let result = tokio::time::timeout(Duration::from_secs(10), async {
-        db.write("test").await.try_init(&uri).await;
+        db.write().await.try_init(&uri).await;
     })
     .await;
 

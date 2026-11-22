@@ -1,7 +1,6 @@
 mod analyze;
 pub mod config;
 mod format;
-pub mod lock;
 pub mod static_structure;
 pub mod structs;
 pub mod toml;
@@ -15,7 +14,6 @@ use std::{
 use cargo::GlobalContext;
 use config::Config;
 use info_provider::InfoProvider;
-use lock::LoggedRwLock;
 use ropey::Rope;
 use static_structure::{parse_all, Parsed};
 use cargo_util_schemas::lockfile::{TomlLockfile, TomlLockfileDependency};
@@ -29,7 +27,7 @@ use url::Url;
 
 pub type Uri = url::Url;
 pub struct Db {
-    pub sel: Option<Arc<LoggedRwLock<Db>>>,
+    pub sel: Option<Arc<RwLock<Db>>>,
     pub client: Client,
     pub static_data: Parsed,
     files: HashMap<Uri, Rope>,
@@ -70,29 +68,29 @@ pub struct Warning {
 }
 
 impl Db {
-    pub fn new(client: Client, info: Arc<InfoProvider>) -> Arc<LoggedRwLock<Db>> {
-        let sel = Arc::new(LoggedRwLock::new(
-            client.clone(),
-            Self {
-                static_data: parse_all(),
-                config: Config::default(),
-                sel: Default::default(),
-                client,
-                info,
-                files: HashMap::new(),
-                trees: HashMap::new(),
-                tomls: HashMap::new(),
-                workspaces: Default::default(),
-                locks: HashMap::new(),
-                warnings: Default::default(),
-            },
-        ));
-        sel
+    pub fn new(client: Client, info: Arc<InfoProvider>) -> Arc<RwLock<Db>> {
+        Arc::new(RwLock::new(Self {
+            static_data: parse_all(),
+            config: Config::default(),
+            sel: Default::default(),
+            client,
+            info,
+            files: HashMap::new(),
+            trees: HashMap::new(),
+            tomls: HashMap::new(),
+            workspaces: Default::default(),
+            locks: HashMap::new(),
+            warnings: Default::default(),
+        }))
     }
 }
 
+/// One level of indentation. `Display` writes the indent string.
+#[derive(derive_more::Display)]
 pub enum Indent {
+    #[display("{}", " ".repeat(*_0 as usize))]
     Spaces(u32),
+    #[display("\t")]
     Tab,
 }
 

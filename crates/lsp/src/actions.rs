@@ -1,7 +1,8 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
+use tokio::sync::RwLockReadGuard;
+
 use parser::{
-    lock::LoggedReadGuard,
     structs::version::is_newer,
     toml::{DepSource, Dependency, DependencyKind, Positioned},
     tree::RangeExclusive,
@@ -25,7 +26,7 @@ impl Context {
         uri: &Url,
         version: &Positioned<String>,
         ver: Option<semver::Version>,
-        lock: &LoggedReadGuard<Db>,
+        lock: &RwLockReadGuard<Db>,
     ) -> Option<CodeAction> {
         let ver = ver?;
         let version_parsed = version.data.parse::<PartialVersion>().ok()?;
@@ -69,7 +70,7 @@ impl Context {
         uri: &Url,
         dep: &Positioned<parser::toml::Dependency>,
         range: &Range,
-        lock: &LoggedReadGuard<Db>,
+        lock: &RwLockReadGuard<Db>,
     ) -> Option<Vec<CodeAction>> {
         if let DepSource::Workspace(_) = dep.data.source {
             return None;
@@ -137,7 +138,7 @@ impl Context {
         &self,
         uri: &Url,
         dep: &Positioned<parser::toml::Dependency>,
-        lock: &LoggedReadGuard<Db>,
+        lock: &RwLockReadGuard<Db>,
     ) -> Option<Vec<CodeAction>> {
         let start = lock.get_offset(uri, dep.start as usize)?;
         let end = lock.get_offset(uri, dep.end as usize)?;
