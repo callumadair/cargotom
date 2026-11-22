@@ -14,7 +14,6 @@ use parser::{
         OptionalKey,
         Positioned,
     },
-    tree::RangeExclusive,
     Db,
     Indent,
 };
@@ -353,25 +352,19 @@ impl LanguageServer for Context
                 let version_info = self
                     .info
                     .get_info(
-                        registry.as_ref().map(|v| v.value.data.as_str()),
+                        registry.as_ref().map(|v| v.data.as_str()),
                         &dep.data.crate_name(),
                     )
                     .await;
-                match version_info
-                {
-                    Ok(data) =>
+                if let Ok(data) = version_info {
+                    if let Some(last) = data.last()
                     {
-                        if let Some(last) = data.last()
+                        if let Some(upgrade_dep) =
+                            self.upgrade_dep(&uri, &value.value, Some(last.version().clone()), &lock)
                         {
-                            if let Some(upgrade_dep) =
-                                self.upgrade_dep(&uri, &value.value, Some(last.version().clone()), &lock)
-                            {
-                                actions.push(CodeActionOrCommand::CodeAction(upgrade_dep));
-                            }
+                            actions.push(CodeActionOrCommand::CodeAction(upgrade_dep));
                         }
                     }
-                    _ =>
-                    {}
                 }
                 let version = &value.value.data;
 
@@ -417,7 +410,7 @@ impl LanguageServer for Context
                     &format!("https://crates.io/crates/{crate_name}"),
                 );
             }
-            else if let DepSource::Workspace(range) = &dep.data.source
+            else if let DepSource::Workspace(_range) = &dep.data.source
             {
                 let workspace_uri = lock.get_workspace(&uri);
                 let workspace = workspace_uri.as_ref().and_then(|v| lock.get_toml(v));
@@ -445,7 +438,7 @@ impl LanguageServer for Context
                         {
                             if let Some(last) = workspace.dependencies.last()
                             {
-                                let line = lock.get_line(&workspace_uri, last.end as usize);
+                                let line = lock.get_line(workspace_uri, last.end as usize);
                                 if let Some(line) = line
                                 {
                                     actions.insert(
@@ -511,7 +504,7 @@ impl LanguageServer for Context
 
         if params.command == "open-src"
         {
-            let name = params.arguments.get(0).and_then(|arg| arg.as_str());
+            let name = params.arguments.first().and_then(|arg| arg.as_str());
             let version = params.arguments.get(1).and_then(|arg| arg.as_str());
             let mut src = if let Some(name) = name
             {
@@ -523,17 +516,11 @@ impl LanguageServer for Context
             };
             if src.is_none()
             {
-                match (name, version)
-                {
-                    (Some(name), Some(version)) =>
-                    {
-                        src = Some(format!(
-                            "https://docs.rs/crate/{}/{}/source/",
-                            name, version
-                        ));
-                    }
-                    _ =>
-                    {}
+                if let (Some(name), Some(version)) = (name, version) {
+                    src = Some(format!(
+                        "https://docs.rs/crate/{}/{}/source/",
+                        name, version
+                    ));
                 }
             }
             if let Some(src) = src
@@ -553,7 +540,7 @@ impl LanguageServer for Context
                     self.client
                         .show_message(
                             MessageType::WARNING,
-                            format!("failed to open browser {}", e.to_string()),
+                            format!("failed to open browser {}", e),
                         )
                         .await;
                     return Err(tower_lsp::jsonrpc::Error::invalid_params(
@@ -591,19 +578,13 @@ impl LanguageServer for Context
                     false => Indent::Tab,
                 },
             )
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(range, text)| {
-                TextEdit {
-                    range:    Range::new(
-                        Position::new(range.0 .0 as u32, range.0 .1 as u32),
-                        Position::new(range.1 .0 as u32, range.1 .1 as u32),
-                    ),
-                    new_text: text,
-                }
-            })
-            .collect();
-        Ok(Some(data))
+            .map(|(new_text, (line, char))| {
+                vec![TextEdit {
+                    range: Range::new(Position::new(0, 0), Position::new(line as u32, char as u32)),
+                    new_text,
+                }]
+            });
+        Ok(data)
     }
 
     async fn inlay_hint(
@@ -743,7 +724,7 @@ impl LanguageServer for Context
                 {
                     deps.remove(&dep.data.name());
                 }
-                let slice = dep.data.name().get(..end).unwrap_or(&dep.data.name());
+                let slice = dep.data.name().get(..end).unwrap_or(dep.data.name());
                 let info = self.info.search(slice).await.unwrap_or_default();
                 let start = try_option!(lock.get_offset(&uri, dep.start as usize));
                 let end = try_option!(lock.get_offset(&uri, dep.end as usize));
@@ -817,7 +798,7 @@ impl LanguageServer for Context
                     let info = self
                         .info
                         .get_info(
-                            registry.as_ref().map(|v| v.value.data.as_str()),
+                            registry.as_ref().map(|v| v.data.as_str()),
                             &dep.data.crate_name(),
                         )
                         .await
@@ -888,7 +869,7 @@ impl LanguageServer for Context
                     let features = self
                         .info
                         .get_info(
-                            registry.as_ref().map(|v| v.value.data.as_str()),
+                            registry.as_ref().map(|v| v.data.as_str()),
                             &dep.data.crate_name(),
                         )
                         .await
@@ -939,9 +920,53 @@ impl LanguageServer for Context
                 }
             }
         }
-        if let Some(feat) = toml.features.iter().find(|v| v.contains(pos))
+        // A value in a `[features]` array completes to another feature of this
+        // manifest or to `dep:` and an optional dependency.
+        if let Some(arg) = toml
+            .features
+            .iter()
+            .flat_map(|feat| feat.data.args.iter().map(move |arg| (feat, arg)))
+            .find(|(_, arg)| arg.contains(pos))
         {
-            // TODO: features
+            let (feat, arg) = arg;
+            let text = arg.data.to_string();
+            let typed = pos.saturating_sub(arg.start as usize + 1);
+            let slice = text.get(..typed).unwrap_or(&text);
+            let listed = feat.data.args.iter().map(|v| v.data.to_string()).collect::<Vec<_>>();
+            let features = toml
+                .features
+                .iter()
+                .map(|v| v.data.name.data.clone())
+                .filter(|name| *name != feat.data.name.data);
+            let optional = toml
+                .dependencies
+                .iter()
+                .filter(|dep| dep.data.optional.as_ref().is_some_and(|v| v.data))
+                .map(|dep| format!("dep:{}", dep.data.name()));
+            let start = try_option!(lock.get_offset(&uri, arg.start as usize));
+            let end = try_option!(lock.get_offset(&uri, arg.end as usize));
+            let range = Range::new(
+                Position::new(start.0 as u32, start.1 as u32),
+                Position::new(end.0 as u32, end.1 as u32),
+            );
+            return Ok(Some(CompletionResponse::List(CompletionList {
+                is_incomplete: true,
+                items:         features
+                    .chain(optional)
+                    .filter(|v| v.starts_with(slice) && !listed.contains(v))
+                    .map(|v| {
+                        CompletionItem {
+                            label: v.clone(),
+                            kind: Some(CompletionItemKind::MODULE),
+                            text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                                range,
+                                new_text: format!("\"{v}\""),
+                            })),
+                            ..Default::default()
+                        }
+                    })
+                    .collect(),
+            })));
         }
 
         let path = lock

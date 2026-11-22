@@ -48,7 +48,7 @@ impl Db {
                     for feature in features {
                         errors.push((
                             RangeExclusive::from(&feature),
-                            format!("Duplicate feature name"),
+                            "Duplicate feature name".to_string(),
                         ));
                     }
                 }
@@ -70,12 +70,12 @@ impl Db {
                 .or_default()
                 .push(toml)
         }
-        for (_, tomls) in &names {
+        for tomls in names.values() {
             if tomls.len() > 1 {
                 for toml in tomls {
                     errors.push((
                         toml.data.crate_name_range(),
-                        format!("Duplicate dependency name"),
+                        "Duplicate dependency name".to_string(),
                     ));
                 }
             }
@@ -87,7 +87,7 @@ impl Db {
                     v.dependencies
                         .iter()
                         .find(|v| v.data.name() == toml.data.crate_name())
-                        .map(|v| (&v.data.source, Some(range.clone()), true))
+                        .map(|v| (&v.data.source, Some(*range), true))
                 })
             } else {
                 Some((&toml.data.source, toml.data.source.range(), false))
@@ -97,7 +97,7 @@ impl Db {
                 let info = self
                     .info
                     .get_info_cache(
-                        registry.as_ref().map(|v| v.value.data.as_str()),
+                        registry.as_ref().map(|v| v.data.as_str()),
                         &toml.data.crate_name(),
                     )
                     .await;
@@ -106,7 +106,7 @@ impl Db {
                     CacheItemOut::Pending => {}
                     CacheItemOut::NotStarted => {
                         let info = self.info.clone();
-                        let reg = registry.as_ref().map(|v| v.value.data.to_string());
+                        let reg = registry.as_ref().map(|v| v.data.to_string());
                         let name = toml.data.crate_name();
                         let uri = uri.clone();
                         let sel = self.sel.clone().unwrap();
@@ -130,7 +130,7 @@ impl Db {
                             warnings.push((
                                 toml.data.crate_name_range(),
                                 crate_not_found_message(
-                                    registry.as_ref().map(|v| v.value.data.as_str()),
+                                    registry.as_ref().map(|v| v.data.as_str()),
                                     &toml.data.crate_name(),
                                 ),
                             ));
@@ -182,10 +182,10 @@ impl Db {
                             .find(|v| v.data.name() == toml.data.crate_name())
                             .is_none()
                         {
-                            errors.push((range.clone(), format!("coundt find crate in workspace")));
+                            errors.push((*range, "coundt find crate in workspace".to_string()));
                         }
                     }
-                    None => errors.push((range.clone(), format!("isnt part of a workspace"))),
+                    None => errors.push((*range, "isnt part of a workspace".to_string())),
                 }
             }
         }

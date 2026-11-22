@@ -4,12 +4,12 @@ use cargo_platform::Platform;
 use taplo::dom::node::TableKind;
 
 use crate::{
-    toml::{DepSource, Dependency, DependencyKind, OptionalKey, Positioned, WithKey},
+    toml::{DepSource, Dependency, DependencyKind, OptionalKey, Positioned},
     tree::{str_to_positioned, Value},
     Tree,
 };
 
-pub fn get_dependencies(
+pub(crate) fn get_dependencies(
     value: &Value,
     kind: DependencyKind,
     targets: Arc<Vec<Positioned<Platform>>>,
@@ -80,50 +80,32 @@ fn dependency_tree_format_parser(value: &Tree, dep: &mut Dependency) {
                 }
             },
             "registry" => match tree_value.value.as_str() {
-                Some(value) => dep.source.set_registry(WithKey::new(
-                    tree_value.key.closest_range(tree_value.pos.end),
-                    value,
-                )),
+                Some(value) => dep.source.set_registry(value),
                 None => continue,
             },
             "git" => match tree_value.value.as_str() {
-                Some(value) => dep.source.set_git(WithKey::new(
-                    tree_value.key.closest_range(tree_value.pos.end),
-                    value,
-                )),
+                Some(value) => dep.source.set_git(value),
                 None => continue,
             },
             "path" => match tree_value.value.as_str() {
-                Some(value) => dep.source.set_path(WithKey::new(
-                    tree_value.key.closest_range(tree_value.pos.end),
-                    value,
-                )),
+                Some(value) => dep.source.set_path(value),
                 None => continue,
             },
             "branch" => match tree_value.value.as_str() {
-                Some(value) => dep.source.set_branch(WithKey::new(
-                    tree_value.key.closest_range(tree_value.pos.end),
-                    value,
-                )),
+                Some(value) => dep.source.set_branch(value),
                 None => continue,
             },
             "tag" => match tree_value.value.as_str() {
-                Some(value) => dep.source.set_tag(WithKey::new(
-                    tree_value.key.closest_range(tree_value.pos.end),
-                    value,
-                )),
+                Some(value) => dep.source.set_tag(value),
                 None => continue,
             },
             "rev" => match tree_value.value.as_str() {
-                Some(value) => dep.source.set_rev(WithKey::new(
-                    tree_value.key.closest_range(tree_value.pos.end),
-                    value,
-                )),
+                Some(value) => dep.source.set_rev(value),
                 None => continue,
             },
             "features" => match &tree_value.value {
                 Value::Array { value, range } => {
-                    let range = tree_value.pos.join(&range);
+                    let range = tree_value.pos.join(range);
                     dep.features.start = range.start;
                     dep.features.end = range.end;
                     dep.features_key_range = Some(tree_value.key.closest_range(tree_value.pos.end));
@@ -155,15 +137,9 @@ fn dependency_tree_format_parser(value: &Tree, dep: &mut Dependency) {
                 Some(v) => v.join(&tree_value.pos),
                 None => tree_value.pos,
             }),
-            _ => {
-                if matches!(tree_value.value, Value::Unknown(_)) {
-                    dep.typing_keys
-                        .push(tree_value.key.to_positioned(tree_value.pos.end));
-                } else {
-                    dep.typing_keys
-                        .push(tree_value.key.to_positioned(tree_value.pos.end));
-                }
-            }
+            _ => dep
+                .typing_keys
+                .push(tree_value.key.to_positioned(tree_value.pos.end)),
         }
     }
 }

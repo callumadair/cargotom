@@ -141,7 +141,7 @@ impl Dependency {
             DepSource::Version { value, registry } => {
                 let dep = dep.set_source(RegistrySource::new(&value.value.data));
                 match registry {
-                    Some(registry) => dep.set_registry(&registry.value.data),
+                    Some(registry) => dep.set_registry(&registry.data),
                     None => dep,
                 }
             }
@@ -151,21 +151,21 @@ impl Dependency {
                 tag,
                 branch,
             } => {
-                let mut git = GitSource::new(url.as_ref().map(|v| v.value.data.as_str()).unwrap_or_default());
+                let mut git = GitSource::new(url.as_ref().map(|v| v.data.as_str()).unwrap_or_default());
                 if let Some(branch) = branch {
-                    git = git.set_branch(&branch.value.data);
+                    git = git.set_branch(&branch.data);
                 }
                 if let Some(tag) = tag {
-                    git = git.set_tag(&tag.value.data);
+                    git = git.set_tag(&tag.data);
                 }
                 if let Some(rev) = rev {
-                    git = git.set_rev(&rev.value.data);
+                    git = git.set_rev(&rev.data);
                 }
                 dep.set_source(git)
             }
             // Cargo diffs the paths without resolving `..`, so normalise first.
             DepSource::Path(path) => dep.set_source(PathSource::new(normalize_path(
-                &from.join(&path.value.data),
+                &from.join(&path.data),
             ))),
             DepSource::Workspace(_) => dep.set_source(WorkspaceSource::new()),
             DepSource::None => return Some(self.name().to_owned()),
@@ -201,18 +201,6 @@ impl Dependency {
 }
 
 #[derive(Debug, Clone)]
-pub struct WithKey {
-    key: RangeExclusive,
-    pub value: Positioned<String>,
-}
-
-impl WithKey {
-    pub fn new(range: RangeExclusive, value: Positioned<String>) -> Self {
-        Self { key: range, value }
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct OptionalKey {
     pub key: Option<RangeExclusive>,
     pub value: Positioned<String>,
@@ -235,17 +223,17 @@ pub enum DepSource {
     /// registry source
     Version {
         value: OptionalKey,
-        registry: Option<WithKey>,
+        registry: Option<Positioned<String>>,
     },
     /// Git source
     Git {
-        url: Option<WithKey>,
-        rev: Option<WithKey>,
-        tag: Option<WithKey>,
-        branch: Option<WithKey>,
+        url: Option<Positioned<String>>,
+        rev: Option<Positioned<String>>,
+        tag: Option<Positioned<String>>,
+        branch: Option<Positioned<String>>,
     },
     /// Local source
-    Path(WithKey),
+    Path(Positioned<String>),
     /// Broken file
     /// for suggestions while typing the name
     None,
@@ -255,7 +243,7 @@ pub enum DepSource {
 impl DepSource {
     pub fn registry(&self) -> Option<&str> {
         match self {
-            DepSource::Version { registry, .. } => registry.as_ref().map(|v| v.value.data.as_str()),
+            DepSource::Version { registry, .. } => registry.as_ref().map(|v| v.data.as_str()),
             _ => None,
         }
     }
@@ -268,13 +256,13 @@ impl DepSource {
                 }
                 Some(r)
             }
-            Self::Workspace(r) => Some(r.clone()),
+            Self::Workspace(r) => Some(*r),
             _ => None,
         }
     }
     pub fn contains(&self, offset: usize) -> bool {
         match self {
-            DepSource::Version { value, registry } => {
+            DepSource::Version { value, registry: _ } => {
                 value.value.contains(offset)
                     || value.key.map(|v| v.contains(offset)).unwrap_or_default()
             }
@@ -313,7 +301,7 @@ impl DepSource {
         }
     }
 
-    pub fn set_git(&mut self, key: WithKey) {
+    pub fn set_git(&mut self, key: Positioned<String>) {
         match self {
             DepSource::Git { url, .. } => {
                 *url = Some(key);
@@ -329,7 +317,7 @@ impl DepSource {
         }
     }
 
-    pub fn set_branch(&mut self, key: WithKey) {
+    pub fn set_branch(&mut self, key: Positioned<String>) {
         match self {
             DepSource::Git { branch, .. } => {
                 *branch = Some(key);
@@ -345,7 +333,7 @@ impl DepSource {
         }
     }
 
-    pub fn set_rev(&mut self, key: WithKey) {
+    pub fn set_rev(&mut self, key: Positioned<String>) {
         match self {
             DepSource::Git { rev, .. } => {
                 *rev = Some(key);
@@ -361,7 +349,7 @@ impl DepSource {
         }
     }
 
-    pub fn set_tag(&mut self, key: WithKey) {
+    pub fn set_tag(&mut self, key: Positioned<String>) {
         match self {
             DepSource::Git { tag, .. } => {
                 *tag = Some(key);
@@ -377,7 +365,7 @@ impl DepSource {
         }
     }
 
-    pub fn set_path(&mut self, key: WithKey) {
+    pub fn set_path(&mut self, key: Positioned<String>) {
         match self {
             DepSource::Path(value) => {
                 *value = key;
@@ -388,7 +376,7 @@ impl DepSource {
         }
     }
 
-    pub fn set_registry(&mut self, key: WithKey) {
+    pub fn set_registry(&mut self, key: Positioned<String>) {
         match self {
             DepSource::Version { registry, .. } => {
                 *registry = Some(key);

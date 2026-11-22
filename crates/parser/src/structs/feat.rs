@@ -5,7 +5,7 @@ use crate::{
     tree::Value,
 };
 
-pub fn get_features(value: &Value) -> Option<Vec<Positioned<Feature>>> {
+pub(crate) fn get_features(value: &Value) -> Option<Vec<Positioned<Feature>>> {
     let tree = value.as_tree()?;
     let mut out = vec![];
     for tree_value in tree.nodes.iter() {

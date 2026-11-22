@@ -42,14 +42,15 @@ impl PathValue {
 }
 
 impl Tree {
+    /// Returns the keys and the value under the byte offset `cursor`, outermost
+    /// first. Returns an empty path when no key or value holds `cursor`.
     pub fn path(&self, cursor: usize) -> Vec<PathValue> {
-        //TODO: check if in content
         self.nodes
             .iter()
             .find_map(|v| match v.key.ranges.iter().find(|v| v.contains(cursor)) {
                 Some(r) => Some(vec![PathValue {
                     tyoe: Type::TreeKey(v.key.value.clone()),
-                    range: r.clone(),
+                    range: *r,
                 }]),
                 None => {
                     let items = v.value.path(cursor);
@@ -97,12 +98,11 @@ pub(crate) struct Key {
 
 impl Key {
     pub fn closest_range(&self, value_start: u32) -> RangeExclusive {
-        self.ranges
+        *self.ranges
             .iter()
             .filter(|v| v.end <= value_start)
             .max_by(|a, b| a.end.cmp(&b.end))
             .unwrap_or(self.ranges.first().unwrap())
-            .clone()
     }
     pub fn to_positioned(&self, value_start: u32) -> Positioned<String> {
         let range = self.closest_range(value_start);
@@ -153,21 +153,24 @@ impl Value {
             Value::String { value, range } => match range.contains(position) {
                 true => vec![PathValue {
                     tyoe: Type::String(value.to_owned()),
-                    range: range.clone(),
+                    range: *range,
                 }],
                 false => vec![],
             },
             Value::Bool { value, range } => match range.contains(position) {
                 true => vec![PathValue {
                     tyoe: Type::Bool(*value),
-                    range: range.clone(),
+                    range: *range,
                 }],
                 false => vec![],
             },
-            Value::Unknown(r) => vec![PathValue {
-                tyoe: Type::Unknown,
-                range: r.clone(),
-            }],
+            Value::Unknown(range) => match range.contains(position) {
+                true => vec![PathValue {
+                    tyoe: Type::Unknown,
+                    range: *range,
+                }],
+                false => vec![],
+            },
         }
     }
 }
@@ -408,5 +411,30 @@ impl Value {
             Value::Bool { range, .. } => Some(*range),
             Value::Unknown(r) => Some(*r),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    /// Returns the path at the first `|` in `source`, with the marker removed.
+    fn path_at(source: &str) -> Vec<String> {
+        let cursor = source.find('|').unwrap();
+        let text = source.replacen('|', "", 1);
+        let dom = taplo::parser::parse(&text).into_dom();
+        let tree = Tree::from(dom.as_table().unwrap());
+        tree.path(cursor).iter().map(|v| v.tyoe.to_string()).collect()
+    }
+
+    #[rstest]
+    #[case::string_after_integer("a = 1\nb = \"x|y\"", &["b", "xy"])]
+    #[case::integer("a = 1|2\nb = \"x\"", &["a", "unknown"])]
+    #[case::key("a = 1\nb| = \"x\"", &["b"])]
+    #[case::outside("a = 1\n\n|", &[])]
+    fn path_finds_the_value_under_the_cursor(#[case] source: &str, #[case] expected: &[&str]) {
+        assert_eq!(path_at(source), expected);
     }
 }

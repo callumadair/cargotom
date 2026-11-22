@@ -33,8 +33,8 @@ impl Context {
         if !is_newer(&version_parsed, &ver) {
             return None;
         }
-        let start = lock.get_offset(&uri, version.start as usize)?;
-        let end = lock.get_offset(&uri, version.end as usize)?;
+        let start = lock.get_offset(uri, version.start as usize)?;
+        let end = lock.get_offset(uri, version.end as usize)?;
 
         Some(CodeAction {
             title: "Upgrade".to_owned(),
@@ -117,7 +117,7 @@ impl Context {
         let mut data = dep.data.clone();
         data.source = DepSource::Workspace(RangeExclusive::default());
         changes.entry(uri.clone()).or_default().push(TextEdit {
-            range: range.clone(),
+            range: *range,
             new_text: data.to_manifest_text(&member_dir, &member_dir)?,
         });
         let make = CodeAction {

@@ -5,15 +5,15 @@ use crate::{Db, Indent, Uri};
 impl Db {
     /// Formats the manifest at `uri` with taplo.
     ///
-    /// Returns one edit that replaces the whole document, as
-    /// `((start line, start char), (end line, end char))` and the new text.
+    /// Returns the formatted text and the `(line, char)` end of the current
+    /// document. The text replaces the whole document from `(0, 0)`.
     /// Returns `None` when the document is not open.
     pub fn format(
         &self,
         uri: &Uri,
         trailing_new_line: bool,
         indent: Indent,
-    ) -> Option<Vec<(((usize, usize), (usize, usize)), String)>> {
+    ) -> Option<(String, (usize, usize))> {
         let content = self.get_content(uri)?;
         let sort = self.config.sort_format;
         let new = taplo::formatter::format(
@@ -29,6 +29,6 @@ impl Db {
             },
         );
         let end = self.get_last_line_and_char(uri).unwrap_or((0, 0));
-        Some(vec![(((0, 0), end), new)])
+        Some((new, end))
     }
 }

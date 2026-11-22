@@ -51,13 +51,13 @@ default-members = ["crates/cargotom"]
     unwrap_used = { level = "deny", priority = 1 }
 
     [workspace.lints.rust]
-    deprecated-safe = "warn"
-    future-incompatible = "warn"
-    keyword-idents = "warn"
-    let-underscore = "warn"
-    nonstandard-style = "warn"
-    refining-impl-trait = "warn"
-    rust-2024-compatibility = "warn"
+    deprecated_safe = "warn"
+    future_incompatible = "warn"
+    keyword_idents = "warn"
+    let_underscore = "warn"
+    nonstandard_style = "warn"
+    refining_impl_trait = "warn"
+    rust_2024_compatibility = "warn"
     unused = "warn"
     warnings = "warn"
 

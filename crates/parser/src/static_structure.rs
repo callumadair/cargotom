@@ -48,7 +48,6 @@ pub struct Data {
 #[derive(Debug)]
 pub struct Val {
     ty: Vec<Types>,
-    default: Option<String>,
     detail: Option<String>,
     values: Option<HashMap<String, Option<String>>>,
 }
@@ -188,7 +187,7 @@ impl Parsed {
         }
         let key = &keys[index];
         let last = index == keys.len() - 1;
-        let item = &self.entries.iter().find(|(k, _)| k.is_match(&key))?.1;
+        let item = &self.entries.iter().find(|(k, _)| k.is_match(key))?.1;
         match (last, is_value) {
             (true, true) => {
                 let mut v = item
@@ -220,7 +219,7 @@ impl Parsed {
         let key = &keys[index];
         let last = index == keys.len() - 1;
         let onel = index + 1 == keys.len() - 1;
-        let item = &self.entries.iter().find(|(k, _)| k.is_match(&key))?.1;
+        let item = &self.entries.iter().find(|(k, _)| k.is_match(key))?.1;
 
         match (last, onel, is_value) {
             (true, true, _) => unreachable!(),
@@ -255,7 +254,7 @@ pub fn parse_all() -> Parsed {
         let res = parse(v, &map);
         let c = Arc::new(res);
         if k == "package" {
-            map.insert(format!("$package"), c.clone());
+            map.insert("$package".to_string(), c.clone());
             out.push((Key::Exact(k), c));
         } else if let Some(v) = k.strip_prefix("$") {
             out.push((Key::Pattern(Regex::new(v).unwrap()), c));
@@ -274,7 +273,6 @@ fn parse(t: ElementKind2, info: &HashMap<String, Arc<Val>>) -> Val {
                 .map(|v| v.trim())
                 .map(|v| parse_type(v, info))
                 .collect::<Vec<_>>(),
-            default: None,
             detail: None,
             values: None,
         },
@@ -304,7 +302,6 @@ fn parse(t: ElementKind2, info: &HashMap<String, Arc<Val>>) -> Val {
             };
             Val {
                 ty,
-                default: t.default,
                 detail: t.description,
                 values: t.values.map(|v| match v {
                     Values::NoDetail(v) => v.into_iter().map(|v| (v, None::<String>)).collect(),

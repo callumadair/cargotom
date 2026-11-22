@@ -260,7 +260,7 @@ impl Db {
         content: &str,
     ) -> Option<()> {
         if let Some(((sl, sc), (el, ec))) = range {
-            let file = self.files.get_mut(&uri)?;
+            let file = self.files.get_mut(uri)?;
             let start = catch_unwind(|| file.line_to_char(sl) + sc).ok()?;
             let end = catch_unwind(|| file.line_to_char(el) + ec).ok()?;
             file.remove(start..end);

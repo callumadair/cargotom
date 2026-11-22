@@ -1,5 +1,3 @@
-use std::usize;
-
 use cargo_util_schemas::core::{PartialVersion, SourceKind};
 use info_provider::api::feature_lines;
 use tokio::sync::RwLockReadGuard;
@@ -25,8 +23,8 @@ impl Context {
     ) -> Option<Hover> {
         let range = dep.data.source.range()?;
         if range.contains(offset) {
-            let start = lock.get_offset(&uri, range.start as usize)?;
-            let end = lock.get_offset(&uri, range.end as usize)?;
+            let start = lock.get_offset(uri, range.start as usize)?;
+            let end = lock.get_offset(uri, range.end as usize)?;
             let info = match self
                 .info
                 .get_info(dep.data.source.registry(), &dep.data.crate_name())
@@ -71,8 +69,8 @@ impl Context {
     ) -> Option<Hover> {
         let range = dep.data.crate_name_range();
         if range.contains(offset) {
-            let start = lock.get_offset(&uri, range.start as usize)?;
-            let end = lock.get_offset(&uri, range.end as usize)?;
+            let start = lock.get_offset(uri, range.start as usize)?;
+            let end = lock.get_offset(uri, range.end as usize)?;
             let lock = lock.get_locked_package(uri, dep.data.name())?;
             let source = lock.source.as_ref()?;
             if !matches!(source.kind(), SourceKind::Registry)
@@ -132,8 +130,8 @@ impl Context {
             .parse()
             .ok()?;
         if range.contains(offset) {
-            let start = lock.get_offset(&uri, range.start as usize)?;
-            let end = lock.get_offset(&uri, range.end as usize)?;
+            let start = lock.get_offset(uri, range.start as usize)?;
+            let end = lock.get_offset(uri, range.end as usize)?;
             let info = match self
                 .info
                 .get_info(dep.data.source.registry(), &dep.data.crate_name())
@@ -180,11 +178,11 @@ impl Context {
     ) -> Option<Hover> {
         let pos = (position.line as usize, position.character as usize);
         let dep = lock.get_dependency(
-            &uri,
+            uri,
             pos,
             (position.line as usize, position.character as usize + 1),
         )?;
-        let offset = lock.get_byte(&uri, pos.0, pos.1).unwrap_or_default();
+        let offset = lock.get_byte(uri, pos.0, pos.1).unwrap_or_default();
         if let Some(v) = self.hover_version(dep, offset, uri, lock).await {
             return Some(v);
         }
