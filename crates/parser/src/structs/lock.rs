@@ -35,37 +35,20 @@ impl Display for LockedPackage<'_> {
 #[cfg(test)]
 mod tests {
     use cargo_util_schemas::lockfile::TomlLockfile;
+    use rstest::rstest;
 
     use super::*;
 
-    const LOCK: &str = r#"
-version = 4
-
-[[package]]
-name = "serde"
-version = "1.0.228"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-
-[[package]]
-name = "taplo"
-version = "0.13.2"
-source = "git+https://github.com/frederik-uni/taplo#0123456789abcdef"
-
-[[package]]
-name = "short"
-version = "0.1.0"
-source = "git+https://example.com/short?branch=main#abc"
-"#;
-
-    #[test]
-    fn display_adds_short_rev_for_git_only() {
-        let lock = toml::from_str::<TomlLockfile>(LOCK).unwrap();
-        let labels = lock
-            .package
-            .unwrap()
-            .iter()
-            .map(|package| LockedPackage(package).to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(labels, ["1.0.228", "0.13.2 #0123456", "0.1.0 #abc"]);
+    #[rstest]
+    #[case::registry("registry+https://github.com/rust-lang/crates.io-index", "1.0.0")]
+    #[case::git_long_rev("git+https://example.com/foo#0123456789abcdef", "1.0.0 #0123456")]
+    #[case::git_short_rev("git+https://example.com/foo?branch=main#abc", "1.0.0 #abc")]
+    fn display_adds_short_rev_for_git_only(#[case] source: &str, #[case] expected: &str) {
+        let lock = format!(
+            "version = 4\n\n[[package]]\nname = \"foo\"\nversion = \"1.0.0\"\nsource = \"{source}\"\n"
+        );
+        let lock = toml::from_str::<TomlLockfile>(&lock).unwrap();
+        let package = &lock.package.unwrap()[0];
+        assert_eq!(LockedPackage(package).to_string(), expected);
     }
 }
