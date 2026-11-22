@@ -772,7 +772,7 @@ impl LanguageServer for Context
                 let start = try_option!(lock.get_offset(&uri, dep.start as usize));
                 let end = try_option!(lock.get_offset(&uri, dep.end as usize));
                 let out = Ok(Some(CompletionResponse::List(CompletionList {
-                    is_incomplete: false,
+                    is_incomplete: true,
                     items:         info
                         .into_iter()
                         .filter(|v| !deps.contains(&v.name.as_str()))
@@ -860,7 +860,7 @@ impl LanguageServer for Context
                         .await
                         .unwrap_or_default();
                     return Ok(Some(CompletionResponse::List(CompletionList {
-                        is_incomplete: false,
+                        is_incomplete: true,
                         items:         info
                             .into_iter()
                             .rev()
@@ -935,7 +935,7 @@ impl LanguageServer for Context
                     let start = try_option!(lock.get_offset(&uri, feat.start as usize));
                     let end = try_option!(lock.get_offset(&uri, feat.end as usize));
                     return Ok(Some(CompletionResponse::List(CompletionList {
-                        is_incomplete: false,
+                        is_incomplete: true,
                         items:         features
                             .into_iter()
                             .filter(|v| v.starts_with(slice))
@@ -1012,7 +1012,7 @@ impl LanguageServer for Context
                     }
                 });
             return Ok(Some(CompletionResponse::List(CompletionList {
-                is_incomplete: false,
+                is_incomplete: true,
                 items:         v.collect(),
             })));
         }
