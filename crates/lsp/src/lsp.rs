@@ -1012,6 +1012,7 @@ impl LanguageServer for Context
     }
 }
 
+/// Serves the language server over stdin and stdout until the client exits.
 pub async fn main()
 {
     let stdin = tokio::io::stdin();

@@ -25,9 +25,13 @@ const CRATES_IO_READMES: &str = "https://static.crates.io/readmes";
 
 /// The state of one cached lookup.
 pub enum CacheItemOut<V> {
+    /// No fetch has started for the key.
     NotStarted,
+    /// A fetch is running.
     Pending,
+    /// The fetch failed with this message.
     Error(String),
+    /// The fetch returned this value.
     Ready(V),
 }
 
@@ -87,6 +91,10 @@ impl<K: Eq + Hash, V: Clone + Send + 'static> Cache<K, V> {
     }
 }
 
+/// Fetches and caches crate data for the language server.
+///
+/// Every method is safe to call from many tasks at once. A blocking fetch runs
+/// on the tokio blocking pool, so the methods need a tokio runtime.
 pub struct InfoProvider {
     per_page: AtomicU32,
     readmes: Cache<(String, String), String>,
@@ -119,9 +127,12 @@ impl InfoProvider {
             .await
     }
 
-    /// Returns every non-yanked version of `name`, as [`api::query_index`]
-    /// describes. The first call for a crate queries the registry, and later
-    /// calls return the same result.
+    /// Returns every non-yanked version of `name` in ascending version order.
+    ///
+    /// `registry` names a registry from the cargo config of the user, and
+    /// `None` means crates.io. A crate that the registry does not have gives
+    /// an empty list. The first call for a crate queries the registry, and
+    /// later calls return the same result, an error included.
     pub async fn get_info(&self, registry: Option<&str>, name: &str) -> Result<Vec<Summary>, String> {
         let key = (registry.map(ToOwned::to_owned), name.to_owned());
         let (registry, name) = key.clone();

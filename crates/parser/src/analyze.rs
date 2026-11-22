@@ -17,6 +17,12 @@ fn crate_not_found_message(registry: Option<&str>, name: &str) -> String {
 }
 
 impl Db {
+    /// Checks the dependencies and features of `uri`, or of every open
+    /// document when `uri` is `None`, and publishes the diagnostics.
+    ///
+    /// # Panics
+    ///
+    /// Panics when [`Db::sel`] is unset and a crate lookup must start.
     pub async fn analyze(&self, uri: Option<Uri>) {
         let _ = self.client.inlay_hint_refresh().await;
         if let Some(uri) = &uri {

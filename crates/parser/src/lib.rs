@@ -1,3 +1,8 @@
+//! Document state and analysis for the cargotom language server.
+//!
+//! [`Db`] holds the open manifests, their syntax trees, the parsed
+//! dependencies and features, and the `Cargo.lock` files beside them.
+
 mod analyze;
 pub mod config;
 mod format;
@@ -25,10 +30,21 @@ use tree::{PathValue, RangeExclusive, Tree};
 use tree_to_struct::to_struct;
 use url::Url;
 
+/// The address of a document, as the client sends it.
 pub type Uri = url::Url;
+
+/// The state of every manifest that the server knows.
+///
+/// Positions are zero-based. A `(line, char)` pair counts characters, and a
+/// byte offset counts UTF-8 bytes from the start of the document.
 pub struct Db {
+    /// A handle to the shared `Db` itself. Analysis needs it to publish
+    /// diagnostics from a spawned task, so the owner must set it before the
+    /// first call to [`Db::analyze`].
     pub sel: Option<Arc<RwLock<Db>>>,
+    /// The client that receives logs, diagnostics and refresh requests.
     pub client: Client,
+    /// The manifest schema for key completion and hover.
     pub static_data: Parsed,
     files: HashMap<Uri, Rope>,
     trees: HashMap<Uri, Tree>,
@@ -37,7 +53,9 @@ pub struct Db {
     /// Workspace root manifest of each member manifest.
     workspaces: HashMap<Uri, Uri>,
     locks: HashMap<Uri, TomlLockfile>,
+    /// The diagnostics of the last analysis, by document.
     pub warnings: Arc<RwLock<HashMap<Uri, Vec<Warning>>>>,
+    /// The client settings.
     pub config: Config,
 }
 
@@ -53,12 +71,16 @@ fn find_workspace_root(manifest: &Uri) -> Option<Uri> {
     Url::from_file_path(root).ok()
 }
 
+/// The severity of a [`Warning`].
 #[derive(Debug, Clone)]
 pub enum Level {
+    /// Shown as an LSP warning.
     Warn,
+    /// Shown as an LSP error.
     Error,
 }
 
+/// One diagnostic, with `(line, char)` start and end positions.
 #[derive(Debug, Clone)]
 pub struct Warning {
     level: Level,
@@ -68,6 +90,8 @@ pub struct Warning {
 }
 
 impl Db {
+    /// Returns an empty `Db` with the default [`Config`]. The caller must set
+    /// [`Db::sel`] to the returned handle.
     pub fn new(client: Client, info: Arc<InfoProvider>) -> Arc<RwLock<Db>> {
         Arc::new(RwLock::new(Self {
             static_data: parse_all(),
@@ -88,13 +112,18 @@ impl Db {
 /// One level of indentation. `Display` writes the indent string.
 #[derive(derive_more::Display)]
 pub enum Indent {
+    /// This many spaces.
     #[display("{}", " ".repeat(*_0 as usize))]
     Spaces(u32),
+    /// One tab.
     #[display("\t")]
     Tab,
 }
 
 impl Db {
+    /// Returns the keys and the value under the cursor, outermost first.
+    /// Returns `None` for an unknown document or when no key or value holds
+    /// the cursor.
     pub async fn get_path(&self, uri: &Uri, line: u32, char: u32) -> Option<Vec<PathValue>> {
         let byte = self.get_byte(uri, line as usize, char as usize)?;
         let tree = self.trees.get(uri)?;
@@ -108,6 +137,7 @@ impl Db {
         }
     }
 
+    /// Forgets every document whose address starts with `workspace_uri`.
     pub fn remove_workspace(&mut self, workspace_uri: &Url) {
         self.files
             .retain(|uri, _| !Self::is_within_workspace(uri, workspace_uri));
@@ -137,6 +167,8 @@ impl Db {
             .find(|package| package.name == name)
     }
 
+    /// Returns the locked package of each dependency that `Cargo.lock` lists,
+    /// with the `(line, char)` position of the end of the dependency.
     pub async fn hints(&self, uri: &Uri) -> Option<Vec<((usize, usize), LockedPackage<'_>)>> {
         let toml = self.tomls.get(uri)?;
         let data = toml
@@ -150,9 +182,12 @@ impl Db {
             .collect::<Vec<_>>();
         Some(data)
     }
+    /// Returns the current text of the document.
     pub fn get_content(&self, uri: &Uri) -> Option<String> {
         Some(self.files.get(uri)?.to_string())
     }
+
+    /// Returns the line that holds the byte offset.
     pub fn get_line(&self, uri: &Uri, bytes_offset: usize) -> Option<usize> {
         if let Some(v) = self.files.get(uri) {
             let line_index = catch_unwind(|| v.byte_to_line(bytes_offset)).ok()?;
@@ -161,14 +196,17 @@ impl Db {
         None
     }
 
+    /// Returns the workspace root manifest of a member manifest.
     pub fn get_workspace(&self, uri: &Uri) -> Option<&Uri> {
         self.workspaces.get(uri)
     }
 
+    /// Returns the parsed dependencies and features of the document.
     pub fn get_toml(&self, uri: &Uri) -> Option<&Toml> {
         self.tomls.get(uri)
     }
 
+    /// Converts a `(line, char)` position to a byte offset.
     pub fn get_byte(&self, uri: &Uri, line: usize, char: usize) -> Option<usize> {
         if let Some(v) = self.files.get(uri) {
             let line_chars = catch_unwind(|| v.line_to_char(line)).ok()?;
@@ -178,6 +216,7 @@ impl Db {
         None
     }
 
+    /// Returns the `(line, char)` position of the end of the document.
     pub fn get_last_line_and_char(&self, uri: &Uri) -> Option<(usize, usize)> {
         if let Some(v) = self.files.get(uri) {
             let total_chars = v.len_chars();
@@ -198,6 +237,7 @@ impl Db {
         }
     }
 
+    /// Converts a byte offset to a `(line, char)` position.
     pub fn get_offset(&self, uri: &Uri, byte_offset: usize) -> Option<(usize, usize)> {
         if let Some(v) = self.files.get(uri) {
             let line_index = catch_unwind(|| v.byte_to_line(byte_offset)).ok()?;
@@ -208,6 +248,8 @@ impl Db {
         }
         None
     }
+    /// Reads the `Cargo.lock` at `uri` from disk and analyses every open
+    /// document. A lock file that cannot be read or parsed is ignored.
     pub async fn update_lock(&mut self, uri: Uri) {
         if let Ok(path) = uri.to_file_path() {
             if let Ok(str) = read_to_string(path) {
@@ -220,6 +262,8 @@ impl Db {
         self.analyze(None).await;
     }
 
+    /// Returns the first dependency that overlaps the range between two
+    /// `(line, char)` positions.
     pub fn get_dependency(
         &self,
         uri: &Uri,
@@ -239,6 +283,8 @@ impl Db {
         Some(found)
     }
 
+    /// Parses the current text of the document again and analyses it. A
+    /// change to a workspace root analyses every open document.
     pub async fn reload(&mut self, uri: Uri) -> Option<()> {
         if let Some(content) = self.files.get(&uri) {
             self.add_content(uri.clone(), &content.to_string());
@@ -253,6 +299,8 @@ impl Db {
         Some(())
     }
 
+    /// Applies one client edit to the text. A `range` of `None` replaces the
+    /// whole document. The caller must call [`Db::reload`] to parse the result.
     pub fn update(
         &mut self,
         uri: &Uri,

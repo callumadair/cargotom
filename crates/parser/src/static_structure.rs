@@ -1,11 +1,19 @@
+//! The manifest schema, for key and value completion and hover text.
+//!
+//! The schema ships as `cargo.json` in this crate. [`parse_all`] reads it into
+//! a [`Parsed`] tree. A key path such as `["dependencies", "serde",
+//! "features"]` walks that tree.
+
 use std::{collections::HashMap, sync::Arc};
 
 use indexmap::IndexMap;
 use regex::bytes::Regex;
 use serde::Deserialize;
 
+/// Schema entries by key. A key that starts with `$` is a regex pattern.
 pub type Elements = IndexMap<String, ElementKind2>;
 
+/// One schema entry, as `cargo.json` writes it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Element {
@@ -45,6 +53,7 @@ pub struct Data {
     pub components: Elements,
 }
 
+/// A parsed schema entry: its possible types, hover text and known values.
 #[derive(Debug)]
 pub struct Val {
     ty: Vec<Types>,
@@ -52,6 +61,7 @@ pub struct Val {
     values: Option<HashMap<String, Option<String>>>,
 }
 
+/// One type that a schema entry accepts.
 #[derive(Debug)]
 pub enum Types {
     Map(Parsed),
@@ -149,6 +159,7 @@ fn parse_type(v: &str, info: &HashMap<String, Arc<Val>>) -> Types {
     }
 }
 
+/// A schema key: one exact key, or a regex that matches many keys.
 #[derive(Debug)]
 pub enum Key {
     Exact(String),
@@ -170,12 +181,17 @@ impl Key {
     }
 }
 
+/// One level of the parsed schema.
 #[derive(Debug)]
 pub struct Parsed {
+    /// The entries of this level, in schema order.
     pub entries: Vec<(Key, Arc<Val>)>,
 }
 
 impl Parsed {
+    /// Returns the completions for the last key of `keys[index..]`. With
+    /// `is_value` the completions are values, and otherwise they are keys.
+    /// Returns `None` when a key on the path is not in the schema.
     pub fn completions(
         &self,
         keys: &[String],
@@ -212,6 +228,8 @@ impl Parsed {
             ),
         }
     }
+    /// Returns the hover text for `keys[index..]`. With `is_value` the last
+    /// entry of `keys` is a value, and the text describes that value.
     pub fn get_detail(&self, keys: &[String], index: usize, is_value: bool) -> Option<String> {
         if index >= keys.len() {
             return None;
@@ -242,6 +260,11 @@ impl Parsed {
     }
 }
 
+/// Parses the bundled `cargo.json` schema.
+///
+/// # Panics
+///
+/// Panics when the bundled schema is malformed.
 pub fn parse_all() -> Parsed {
     let v: Data = serde_json::from_str(include_str!("../cargo.json")).unwrap();
     let mut map = HashMap::new();

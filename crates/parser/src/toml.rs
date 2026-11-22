@@ -1,3 +1,6 @@
+//! The dependencies and features of a manifest, with the byte range of each
+//! part for editor features.
+
 use std::{path::Path, sync::Arc};
 
 use cargo::{
@@ -16,14 +19,19 @@ use toml_edit::{DocumentMut, Item, Value};
 
 use crate::tree::RangeExclusive;
 
+/// The parsed parts of one manifest.
 #[derive(Debug)]
 pub struct Toml {
+    /// The manifest has a `[workspace]` table.
     pub workspace: bool,
+    /// Every dependency, from every dependency table and target.
     pub dependencies: Vec<Positioned<Dependency>>,
+    /// The entries of `[features]`.
     pub features: Vec<Positioned<Feature>>,
 }
 
 impl Toml {
+    /// Returns the dependencies and features of both, in order.
     pub fn join(self, other: Self) -> Self {
         Self {
             workspace: self.workspace || other.workspace,
@@ -49,14 +57,18 @@ pub struct Positioned<T> {
 }
 
 impl<T> Positioned<T> {
+    /// Returns `data` positioned from `start` to `end`.
     pub fn new(start: u32, end: u32, data: T) -> Self {
         Self { start, end, data }
     }
 
+    /// Returns `true` when `offset` is between `start` and `end`, both
+    /// included.
     pub fn contains(&self, offset: usize) -> bool {
         self.start <= offset as u32 && offset as u32 <= self.end
     }
 
+    /// Returns `true` when `range` and the value share a byte, ends included.
     pub fn overlap(&self, range: RangeExclusive) -> bool {
         range.start <= self.end && range.end >= self.start
     }
@@ -65,14 +77,18 @@ impl<T> Positioned<T> {
 /// A dependency table. `FromStr` parses the table name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::EnumString)]
 pub enum DependencyKind {
+    /// `[dependencies]`
     #[strum(serialize = "dependencies")]
     Normal,
+    /// `[dev-dependencies]`
     #[strum(serialize = "dev-dependencies")]
     Development,
+    /// `[build-dependencies]`
     #[strum(serialize = "build-dependencies")]
     Build,
 }
 
+/// One dependency entry, which can be incomplete while the user types.
 #[derive(Debug, Clone)]
 pub struct Dependency {
     /// Name of the dependency
@@ -81,15 +97,20 @@ pub struct Dependency {
     pub kind: DependencyKind,
     /// Source of the dependency
     pub source: DepSource,
+    /// The `package` key, which names the crate when it differs from the key
     pub package: Option<Positioned<String>>,
     /// Enable features for this dependency
     pub features: Positioned<Vec<Positioned<String>>>,
+    /// The byte range of the `features` key
     pub features_key_range: Option<RangeExclusive>,
+    /// The `default-features` key
     pub default_features: Option<Positioned<bool>>,
     /// Keys that are being typed
     pub typing_keys: Vec<Positioned<String>>,
     /// Is optional dependency
     pub optional: Option<Positioned<bool>>,
+    /// The dependency is written as an inline table and not as a dotted key
+    /// or a bare version.
     pub expanded: bool,
     /// Target platforms for this dependency
     /// if empty = all platforms
@@ -97,6 +118,8 @@ pub struct Dependency {
 }
 
 impl Dependency {
+    /// Returns the crate name, which is `package` when set and the key
+    /// otherwise.
     pub fn crate_name(&self) -> String {
         self.package
             .as_ref()
@@ -105,14 +128,17 @@ impl Dependency {
             .to_owned()
     }
 
+    /// Sets the key. The range stays the same.
     pub fn set_name(&mut self, name: String) {
         self.name.data = name;
     }
 
+    /// Returns the key.
     pub fn name(&self) -> &str {
         &self.name.data
     }
 
+    /// Returns the byte range of the key.
     pub fn crate_name_range(&self) -> RangeExclusive {
         RangeExclusive::from(&self.name)
     }
@@ -200,53 +226,74 @@ impl Dependency {
     }
 }
 
+/// A version requirement, with the range of its `version` key when the
+/// dependency is a table.
 #[derive(Debug, Clone)]
 pub struct OptionalKey {
+    /// The byte range of the `version` key.
     pub key: Option<RangeExclusive>,
+    /// The requirement.
     pub value: Positioned<String>,
 }
 
 impl OptionalKey {
+    /// Returns a requirement written as `version = "..."`.
     pub fn with_key(range: RangeExclusive, value: Positioned<String>) -> Self {
         Self {
             key: Some(range),
             value,
         }
     }
+    /// Returns a requirement written as a bare string.
     pub fn no_key(value: Positioned<String>) -> Self {
         Self { key: None, value }
     }
 }
 
+/// Where a dependency comes from.
+///
+/// A `set_*` method switches to the source kind that its key belongs to and
+/// keeps the other keys of that kind. Only a version leaves a git or path
+/// source unchanged.
 #[derive(Debug, Clone)]
 pub enum DepSource {
     /// registry source
     Version {
+        /// The version requirement.
         value: OptionalKey,
+        /// The `registry` key. `None` means crates.io.
         registry: Option<Positioned<String>>,
     },
-    /// Git source
+    /// Git source. A key that the manifest leaves out is `None`.
     Git {
+        /// `git`
         url: Option<Positioned<String>>,
+        /// `rev`
         rev: Option<Positioned<String>>,
+        /// `tag`
         tag: Option<Positioned<String>>,
+        /// `branch`
         branch: Option<Positioned<String>>,
     },
-    /// Local source
+    /// Local source, with the path as written
     Path(Positioned<String>),
     /// Broken file
     /// for suggestions while typing the name
     None,
+    /// `workspace = true`, with the byte range of the key and value.
     Workspace(RangeExclusive),
 }
 
 impl DepSource {
+    /// Returns the `registry` key of a registry source.
     pub fn registry(&self) -> Option<&str> {
         match self {
             DepSource::Version { registry, .. } => registry.as_ref().map(|v| v.data.as_str()),
             _ => None,
         }
     }
+    /// Returns the byte range of the version key and value, or of
+    /// `workspace = true`.
     pub fn range(&self) -> Option<RangeExclusive> {
         match self {
             DepSource::Version { value, .. } => {
@@ -260,6 +307,7 @@ impl DepSource {
             _ => None,
         }
     }
+    /// Returns `true` when `offset` is on the version key or value.
     pub fn contains(&self, offset: usize) -> bool {
         match self {
             DepSource::Version { value, registry: _ } => {
@@ -269,6 +317,7 @@ impl DepSource {
             _ => false,
         }
     }
+    /// Returns the byte offset of the end of the version value.
     pub fn end(&self) -> Option<u32> {
         match self {
             DepSource::Version { value, .. } => Some(value.value.end),
@@ -276,6 +325,7 @@ impl DepSource {
         }
     }
 
+    /// Returns the version requirement of a registry source.
     pub fn version(&self) -> Option<&Positioned<String>> {
         match self {
             DepSource::Version { value, .. } => Some(&value.value),
@@ -283,9 +333,11 @@ impl DepSource {
         }
     }
 
+    /// Sets `workspace = true`.
     pub fn set_workspace(&mut self, range: RangeExclusive) {
         *self = DepSource::Workspace(range)
     }
+    /// Sets the version requirement.
     pub fn set_version(&mut self, key: OptionalKey) {
         match self {
             DepSource::Version { value, .. } => {
@@ -301,6 +353,7 @@ impl DepSource {
         }
     }
 
+    /// Sets the `git` URL.
     pub fn set_git(&mut self, key: Positioned<String>) {
         match self {
             DepSource::Git { url, .. } => {
@@ -317,6 +370,7 @@ impl DepSource {
         }
     }
 
+    /// Sets the git `branch`.
     pub fn set_branch(&mut self, key: Positioned<String>) {
         match self {
             DepSource::Git { branch, .. } => {
@@ -333,6 +387,7 @@ impl DepSource {
         }
     }
 
+    /// Sets the git `rev`.
     pub fn set_rev(&mut self, key: Positioned<String>) {
         match self {
             DepSource::Git { rev, .. } => {
@@ -349,6 +404,7 @@ impl DepSource {
         }
     }
 
+    /// Sets the git `tag`.
     pub fn set_tag(&mut self, key: Positioned<String>) {
         match self {
             DepSource::Git { tag, .. } => {
@@ -365,6 +421,7 @@ impl DepSource {
         }
     }
 
+    /// Sets the `path`.
     pub fn set_path(&mut self, key: Positioned<String>) {
         match self {
             DepSource::Path(value) => {
@@ -376,6 +433,7 @@ impl DepSource {
         }
     }
 
+    /// Sets the `registry`.
     pub fn set_registry(&mut self, key: Positioned<String>) {
         match self {
             DepSource::Version { registry, .. } => {
@@ -398,6 +456,7 @@ impl DepSource {
     }
 }
 
+/// One entry of `[features]`.
 #[derive(Debug)]
 pub struct Feature {
     /// feature-name =

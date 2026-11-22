@@ -1,3 +1,6 @@
+//! A syntax tree of a manifest that keeps the byte range of every key and
+//! value, for lookups by cursor position.
+
 use taplo::{
     dom::{
         node::{DomNode, Table, TableKind},
@@ -15,22 +18,32 @@ pub(crate) struct Tree {
     pub pos: RangeExclusive,
 }
 
+/// One step of a [`PathValue`] path. `Display` writes the key or the value.
 #[derive(Debug, derive_more::Display)]
 pub enum Type {
+    /// A table key.
     TreeKey(String),
+    /// A string value.
     String(String),
+    /// A boolean value.
     Bool(bool),
+    /// A value of any other kind, or one that does not parse.
     #[display("unknown")]
     Unknown,
 }
 
+/// One key or value on the path to a cursor, with its byte range.
 #[derive(Debug)]
 pub struct PathValue {
+    /// The key or value.
     pub tyoe: Type,
+    /// The byte range of the key or value.
     pub range: RangeExclusive,
 }
 
 impl PathValue {
+    /// Returns `true` when this step is a value and not a key. `last` is the
+    /// step before it. A step that starts where `last` starts is a key.
     pub fn is_value(&self, last: Option<&Self>) -> bool {
         if let Some(last) = last {
             if self.range.start == last.range.start {
@@ -175,9 +188,12 @@ impl Value {
     }
 }
 
+/// A byte range in a document.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
 pub struct RangeExclusive {
+    /// The offset of the first byte.
     pub start: u32,
+    /// The offset after the last byte.
     pub end: u32,
 }
 
@@ -200,14 +216,18 @@ impl<T> From<&Positioned<T>> for RangeExclusive {
 }
 
 impl RangeExclusive {
+    /// Returns the range from `start` to `end`.
     pub fn new(start: u32, end: u32) -> Self {
         Self { start, end }
     }
 
+    /// Returns `true` when `offset` is in the range or equals `end`, so that
+    /// a cursor just after the last byte counts.
     pub fn contains(&self, offset: usize) -> bool {
         self.start <= offset as u32 && offset as u32 <= self.end
     }
 
+    /// Returns the smallest range that covers both ranges.
     pub fn join(&self, other: &RangeExclusive) -> Self {
         Self {
             start: self.start.min(other.start),
@@ -346,6 +366,7 @@ impl From<TextRange> for RangeExclusive {
     }
 }
 
+/// Returns `str` positioned at `range`.
 pub fn str_to_positioned(str: &str, range: &RangeExclusive) -> Positioned<String> {
     Positioned {
         start: range.start,
