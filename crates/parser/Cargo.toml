@@ -4,21 +4,21 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+async-recursion.workspace = true
+difference = "2.0.0"
+glob.workspace = true
+indexmap = { workspace = true, features = ["serde"] }
+info-provider = { workspace = true }
+regex.workspace = true
 ropey.workspace = true
+rust-version.workspace = true
 serde = { workspace = true, features = ["derive"] }
-toml.workspace = true
 serde_json.workspace = true
 taplo.workspace = true
-url.workspace = true
-difference = "2.0.0"
-tower-lsp.workspace = true
-info-provider = { workspace = true }
-rust-version.workspace = true
 tokio = { workspace = true, features = ["sync"] }
-async-recursion.workspace = true
-indexmap = { workspace = true, features = ["serde"] }
-regex.workspace = true
-glob.workspace = true
+toml.workspace = true
+tower-lsp.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

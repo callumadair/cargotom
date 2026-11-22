@@ -4,14 +4,14 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-parser = { workspace = true }
-util = { workspace = true }
+clap = { version = "4.5.35", features = ["derive"] }
 crate_info = { workspace = true }
+glob = { workspace = true }
+parser = { workspace = true }
+proctitle = { workspace = true }
 serde_json = { workspace = true }
 tcp-struct = { workspace = true }
-glob = { workspace = true }
-proctitle = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std"] }
+tokio = { workspace = true, features = ["io-std", "macros", "rt-multi-thread"] }
 tower-lsp = "0.20.0"
-clap = { version = "4.5.35", features = ["derive"] }
+util = { workspace = true }
 webbrowser = "1.0.4"

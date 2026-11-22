@@ -4,20 +4,20 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+byteorder.workspace = true
+cargo-config2 = "0.1.39"
+fst.workspace = true
+html2md.workspace = true
+openssl = { workspace = true, features = ["vendored"] }
 reqwest = { workspace = true, features = ["json"] }
+rust-version.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+tar = "0.4"
 tokio = { workspace = true, features = ["sync"] }
 urlencoding.workspace = true
-anyhow.workspace = true
-rust-version.workspace = true
 zstd = "0.13.3"
-tar = "0.4"
-byteorder.workspace = true
-html2md.workspace = true
-fst.workspace = true
-openssl = {workspace = true, features = ["vendored"]}
-cargo-config2 = "0.1.39"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

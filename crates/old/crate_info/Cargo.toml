@@ -4,13 +4,13 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-reqwest = { workspace = true, features = ["json"] }
-tcp-struct = { workspace = true }
+git2 = { version = "0.19.0", features = ["vendored-openssl"] }
 parser = { workspace = true }
-util = { workspace = true }
-trie-rs = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+tcp-struct = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "macros", "rt-multi-thread"] }
+trie-rs = { workspace = true }
 urlencoding = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std"] }
-git2 = { version = "0.19.0", features = ["vendored-openssl"] }
+util = { workspace = true }
